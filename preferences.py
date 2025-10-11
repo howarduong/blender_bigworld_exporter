@@ -1,92 +1,116 @@
-# 相对路径: preferences.py
-# 主要功能: 插件全局设置 (Preferences)，包括:
-#   - 导出根目录
-#   - 引擎版本 (2.x / 3.x)
-#   - 默认缩放
-#   - 坐标系模式 (与 3ds Max 兼容 / Blender 原生)
-#   - 校验与日志选项 (结构校验/Hex Diff/详细日志)
-#
-# 注意:
-#   - 所有设置需持久化保存，供导出时统一使用。
-#   - 字段默认值需与旧 3ds Max 插件保持一致。
-#
-# 开发前必读参考（每次构建前必须学习研究原 3ds Max 插件代码）:
-# BigWorld_MAXScripts GitHub 仓库（宏脚本全集）：
-# https://github.com/howarduong/BigWorld_MAXScripts/tree/1b7eb719e475c409afa319877f4550cf5accbafc/BigWorld_MacroScripts
-
+# -*- coding: utf-8 -*-
 import bpy
+from bpy.props import (
+    BoolProperty,
+    EnumProperty,
+    FloatProperty,
+    IntProperty,
+    StringProperty,
+)
 
 
 class BigWorldAddonPreferences(bpy.types.AddonPreferences):
-    bl_idname = __package__  # 使用包名作为 ID
+    bl_idname = __package__ if __package__ else "blender_bigworld_exporter"
 
-    # 导出根目录
-    export_root: bpy.props.StringProperty(
+    # 全局默认参数（导出根目录、引擎版本、默认缩放、坐标系模式）
+    export_root: StringProperty(
         name="导出根目录",
-        subtype='DIR_PATH',
-        default=""
+        description="导出文件的根目录，可使用 // 表示相对当前 blend 的路径",
+        default="//BigWorldExport"
     )
 
-    # 引擎版本
-    engine_version: bpy.props.EnumProperty(
+    engine_version: EnumProperty(
         name="引擎版本",
+        description="BigWorld 引擎版本，影响导出格式与兼容性",
         items=[
-            ('BW2', "2.x", "BigWorld 2.x"),
-            ('BW3', "3.x", "BigWorld 3.x")
+            ('V2', "2.x", "BigWorld 2.x"),
+            ('V3', "3.x", "BigWorld 3.x")
         ],
-        default='BW3'
+        default='V3'
     )
 
-    # 默认缩放
-    default_scale: bpy.props.FloatProperty(
-        name="默认缩放",
+    default_scale: FloatProperty(
+        name="默认单位缩放",
+        description="导出时对几何的统一缩放倍数",
         default=1.0,
-        min=0.0001,
-        max=1000.0
+        min=0.001,
+        max=100.0
     )
 
-    # 坐标系模式
-    coord_mode: bpy.props.EnumProperty(
+    coord_mode: EnumProperty(
         name="坐标系模式",
+        description="坐标轴模式：兼容 3ds Max 或 Blender 原生",
         items=[
-            ('MAX_COMPAT', "与3ds Max兼容", "Y-Up → Z-Up"),
-            ('BLENDER_NATIVE', "Blender原生", "保持 Blender 坐标系")
+            ('YUP', "Y-Up", "Y轴向上（与某些旧版工具链兼容）"),
+            ('ZUP', "Z-Up", "Z轴向上（Blender 原生）"),
         ],
-        default='MAX_COMPAT'
+        default='YUP'
     )
 
-    # 校验与日志选项
-    enable_struct_check: bpy.props.BoolProperty(
-        name="启用结构校验（严格）",
+    # Validator 全局开关与参数（作为默认值）
+    enable_pathfix: BoolProperty(
+        name="启用路径自动修复 (PathValidator)",
+        default=True
+    )
+
+    enable_structure: BoolProperty(
+        name="启用结构校验 (StructureChecker)",
+        default=True
+    )
+
+    enable_hexdiff: BoolProperty(
+        name="启用二进制对比 (HexDiff)",
         default=False
     )
 
-    enable_hex_diff: bpy.props.BoolProperty(
-        name="启用十六进制差异比对",
-        default=False
-    )
-
-    enable_verbose_log: bpy.props.BoolProperty(
-        name="输出详细日志",
-        default=False
+    hexdiff_max: IntProperty(
+        name="最大差异数",
+        description="HexDiff 对比最多记录的差异数量",
+        default=100,
+        min=1,
+        max=1000
     )
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="BigWorld 导出插件 - 全局设置")
 
+        # 标题
+        col = layout.column()
+        col.label(text="BigWorld Exporter 插件偏好设置", icon='PREFERENCES')
+
+        # 全局设置
         box = layout.box()
-        box.label(text="导出路径与版本")
+        box.label(text="导出根目录与版本")
         box.prop(self, "export_root")
         box.prop(self, "engine_version")
-
-        box = layout.box()
-        box.label(text="坐标与缩放")
-        box.prop(self, "default_scale")
         box.prop(self, "coord_mode")
 
         box = layout.box()
-        box.label(text="校验与日志")
-        box.prop(self, "enable_struct_check")
-        box.prop(self, "enable_hex_diff")
-        box.prop(self, "enable_verbose_log")
+        box.label(text="缩放与默认值")
+        box.prop(self, "default_scale")
+
+        # Validator 设置（默认值）
+        box = layout.box()
+        box.label(text="Validator 默认设置")
+        row = box.row()
+        row.prop(self, "enable_pathfix")
+        row = box.row()
+        row.prop(self, "enable_structure")
+        row = box.row()
+        row.prop(self, "enable_hexdiff")
+        if self.enable_hexdiff:
+            box.prop(self, "hexdiff_max")
+
+
+# 注册/卸载
+classes = (
+    BigWorldAddonPreferences,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
