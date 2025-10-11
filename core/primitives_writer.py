@@ -29,11 +29,12 @@ from .utils import (
     ensure_posix_lower_relative_path,
 )
 from .utils import ExportAxis, ExportUnits
-from .validators.structure_checker import (
-    validate_primitives_topology,
-    validate_primitives_groups,
-    validate_vertex_streams,
+from ..validators.structure_checker import (
+    validate_vertex_count,
+    validate_index_count,
+    validate_material_groups,
 )
+
 from .validators.path_validator import validate_output_path
 
 
@@ -702,3 +703,4 @@ def export_primitives_for_object(
     """
     writer = PrimitivesWriter(ctx, opts)
     writer.write_object(obj, output_path)
+
