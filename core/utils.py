@@ -1,34 +1,82 @@
-# 相对路径: core/utils.py
-# 功能: 提供通用工具函数，保持与 3ds Max 插件功能对齐
-# 原则: 保留占位，不精简合并，逐项展开，方便后续对照 Max 插件补齐
+# -*- coding: utf-8 -*-
+"""
+BigWorld Blender Exporter - Utils (strictly aligned, centralized)
 
+- Centralized axis mapping (Y-up -> Z-up), unit scaling, matrix flatten
+- Path normalization: relative to export root, lowercase, POSIX separators
+- Index winding flip; normals/tangents placeholder rebuild (for legacy alignment)
+- Object custom property helpers
+- Enums for axis/units to keep context consistent across writers
+
+Author: Blender 4.5.3 adaptation team
+"""
+
+from __future__ import annotations
 import math
 from pathlib import Path
-from typing import List, Tuple, Sequence
+from typing import List, Tuple, Sequence, Optional
+
+
+# ====== Enums / constants ======
+class ExportAxis:
+    IDENTITY = 0
+    Y_UP_TO_Z_UP = 1
+
+
+class ExportUnits:
+    METERS = 0
+    IDENTITY = 1  # When unit scaling should be disabled
 
 
 # =========================
-# 坐标/矩阵相关
+# Axis mapping (vectors)
 # =========================
 
-def axis_map_y_up_to_z_up(vec3: Tuple[float, float, float]) -> Tuple[float, float, float]:
-    """坐标系转换: Blender Y-Up → BigWorld Z-Up"""
+def axis_map_y_up_to_z_up_vec3(vec3: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """
+    Coordinate system conversion: Blender Y-Up -> BigWorld Z-Up
+    Mapping rule (legacy-aligned):
+      (x, y, z) -> (x, z, -y)
+    """
     x, y, z = vec3
     return (x, z, -y)
 
 
-def axis_map_matrix_y_up_to_z_up_row_major(m: Sequence[float]) -> Tuple[float, ...]:
-    """矩阵转换: 4x4 行主序矩阵 Y-Up → Z-Up"""
-    A = (
-        1, 0,  0, 0,
-        0, 0,  1, 0,
-        0,-1,  0, 0,
-        0, 0,  0, 1,
-    )
-    B = A
+def axis_map_y_up_to_z_up_vec4(vec4: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    """
+    Vector4 mapping; w kept as-is. Tangent sign or quaternion w can be preserved.
+    """
+    x, y, z, w = vec4
+    return (x, z, -y, w)
 
-    def matmul_row_major(a, b):
-        out = [0.0]*16
+
+def axis_map_y_up_to_z_up_tangent(tan4: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    """
+    Tangent mapping (xyz + sign), consistent with vec4 mapping for xyz; sign preserved.
+    """
+    x, y, z, sign = tan4
+    return (x, z, -y, sign)
+
+
+# =========================
+# Axis mapping (matrix)
+# =========================
+
+def axis_map_y_up_to_z_up_matrix_row_major(m: Sequence[float]) -> Tuple[float, ...]:
+    """
+    Matrix conversion: 4x4 row-major matrix Y-Up -> Z-Up.
+    Applies M' = A * M * B where A/B perform basis change.
+    """
+    A = (
+        1, 0, 0, 0,
+        0, 0, 1, 0,
+        0,-1, 0, 0,
+        0, 0, 0, 1,
+    )
+    B = A  # symmetric for this basis change
+
+    def matmul_row_major(a: Sequence[float], b: Sequence[float]) -> Tuple[float, ...]:
+        out = [0.0] * 16
         for r in range(4):
             for c in range(4):
                 s = 0.0
@@ -44,27 +92,84 @@ def axis_map_matrix_y_up_to_z_up_row_major(m: Sequence[float]) -> Tuple[float, .
 
 
 def to_row_major_tuple_4x4(mat) -> Tuple[float, ...]:
-    """Blender Matrix → 行主序 16 元组"""
+    """
+    Blender Matrix -> row-major 16-tuple
+    """
     return tuple(v for row in mat for v in row)
 
 
-def apply_unit_scale(vec3: Tuple[float, float, float], scale: float) -> Tuple[float, float, float]:
-    """应用单位缩放"""
+def axis_map_y_up_to_z_up_matrix(mat) -> Tuple[Tuple[float, float, float, float], ...]:
+    """
+    Blender Matrix -> Blender Matrix with Y->Z mapping applied by left/right basis change.
+    Provided for callers that prefer matrix × matrix rather than flatten-first.
+    """
+    # Convert to row-major, apply mapping, then rebuild 4x4
+    rm = to_row_major_tuple_4x4(mat)
+    mapped = axis_map_y_up_to_z_up_matrix_row_major(rm)
+    return (
+        (mapped[0], mapped[1], mapped[2], mapped[3]),
+        (mapped[4], mapped[5], mapped[6], mapped[7]),
+        (mapped[8], mapped[9], mapped[10], mapped[11]),
+        (mapped[12], mapped[13], mapped[14], mapped[15]),
+    )
+
+
+# =========================
+# Unit scaling
+# =========================
+
+def apply_unit_scale_vec3(vec3: Tuple[float, float, float], scale: float) -> Tuple[float, float, float]:
+    """
+    Apply uniform unit scale to a 3-vector.
+    """
     return (vec3[0] * scale, vec3[1] * scale, vec3[2] * scale)
 
 
 def scene_unit_to_meters(unit_scale: float) -> float:
-    """Blender 场景单位 → 米比例"""
+    """
+    Blender scene unit factor -> meters ratio.
+    Kept simple: caller passes the factor directly (e.g., 0.01 for cm).
+    """
     return float(unit_scale)
 
 
 # =========================
-# 索引/绕序相关
+# Path normalization
+# =========================
+
+def ensure_posix_lower_relative_path(root: str, target: str) -> str:
+    """
+    Normalize a path:
+      - relative to 'root'
+      - lowercase
+      - POSIX separators ('/')
+    If relative conversion fails, still force lowercase + POSIX separators for target.
+    """
+    try:
+        rp = Path(root).resolve()
+        tp = Path(target).resolve()
+        rel = tp.relative_to(rp)
+        return str(rel).replace("\\", "/").lower()
+    except Exception:
+        return str(target).replace("\\", "/").lower()
+
+
+def make_relative_path(root: str, target: str) -> str:
+    """
+    Deprecated wrapper kept for strict alignment; use ensure_posix_lower_relative_path.
+    """
+    return ensure_posix_lower_relative_path(root, target)
+
+
+# =========================
+# Index winding / ranges
 # =========================
 
 def flip_winding(indices: List[int]) -> List[int]:
-    """翻转三角形绕序 (i0,i1,i2) → (i0,i2,i1)"""
-    flipped = []
+    """
+    Flip triangle winding: (i0, i1, i2) -> (i0, i2, i1)
+    """
+    flipped: List[int] = []
     for i in range(0, len(indices), 3):
         i0, i1, i2 = indices[i:i+3]
         flipped += [i0, i2, i1]
@@ -72,24 +177,24 @@ def flip_winding(indices: List[int]) -> List[int]:
 
 
 # =========================
-# 法线/切线相关
+# Normals / tangents rebuild (placeholders)
 # =========================
 
 def rebuild_normals(vertices: List[Tuple[float, float, float]],
                     indices: List[int],
                     angle_threshold_degrees: float = 45.0) -> List[Tuple[float, float, float]]:
     """
-    法线重建 (占位实现)。
-    TODO: 对齐 BigWorld_Munge_Normals.mcr 的平滑组/角度阈值逻辑。
+    Normal rebuild (placeholder implementation).
+    TODO: align with legacy Max 'Munge Normals' macro (smoothing groups, angle threshold).
     """
     V = len(vertices)
     acc = [(0.0, 0.0, 0.0) for _ in range(V)]
-    counts = [0]*V
+    counts = [0] * V
 
     def sub(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
     def cross(a, b): return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
     def norm(a):
-        l = math.sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]) or 1.0
+        l = math.sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]) or 1.0
         return (a[0]/l, a[1]/l, a[2]/l)
 
     for i in range(0, len(indices), 3):
@@ -102,7 +207,7 @@ def rebuild_normals(vertices: List[Tuple[float, float, float]],
             acc[idx] = (ax+n[0], ay+n[1], az+n[2])
             counts[idx] += 1
 
-    out = []
+    out: List[Tuple[float, float, float]] = []
     for i in range(V):
         n = acc[i]
         out.append(norm(n) if counts[i] else (0.0, 0.0, 1.0))
@@ -113,15 +218,15 @@ def rebuild_tangents(vertices: List[Tuple[float, float, float]],
                      indices: List[int],
                      uvs: List[Tuple[float, float]]) -> List[Tuple[float, float, float]]:
     """
-    切线重建 (占位实现)。
-    TODO: 对齐 Max 插件的切线空间构建逻辑。
+    Tangent rebuild (placeholder implementation).
+    TODO: align with legacy Max plugin's tangent space construction.
     """
     V = len(vertices)
     tx = [(0.0, 0.0, 0.0) for _ in range(V)]
 
     def sub(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
     def norm(a):
-        l = math.sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]) or 1.0
+        l = math.sqrt(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]) or 1.0
         return (a[0]/l, a[1]/l, a[2]/l)
 
     for i in range(0, len(indices), 3):
@@ -133,6 +238,7 @@ def rebuild_tangents(vertices: List[Tuple[float, float, float]],
         dp2 = sub(p2, p0)
         duv1 = (uv1[0]-uv0[0], uv1[1]-uv0[1])
         duv2 = (uv2[0]-uv0[0], uv2[1]-uv0[1])
+
         denom = (duv1[0]*duv2[1] - duv2[0]*duv1[1]) or 1.0
         t = (
             (dp1[0]*duv2[1] - dp2[0]*duv1[1]) / denom,
@@ -140,40 +246,25 @@ def rebuild_tangents(vertices: List[Tuple[float, float, float]],
             (dp1[2]*duv2[1] - dp2[2]*duv1[1]) / denom,
         )
         t = norm(t)
+
         for idx in (i0, i1, i2):
             ax, ay, az = tx[idx]
             tx[idx] = (ax+t[0], ay+t[1], az+t[2])
 
-    out = []
+    out: List[Tuple[float, float, float]] = []
     for i in range(V):
         out.append(norm(tx[i]))
     return out
 
 
 # =========================
-# 路径处理
-# =========================
-
-def make_relative_path(root: str, target: str) -> str:
-    """
-    转换为相对路径，小写化。
-    TODO: 对齐 Max 插件路径规则 (统一 / 分隔符)。
-    """
-    try:
-        rp = Path(root).resolve()
-        tp = Path(target).resolve()
-        rel = str(tp.relative_to(rp)).replace("\\", "/")
-        return rel.lower()
-    except Exception:
-        return target.replace("\\", "/").lower()
-
-
-# =========================
-# 自定义属性读写
+# Custom properties helpers
 # =========================
 
 def get_obj_prop(obj, key: str, default=None):
-    """读取对象自定义属性 (占位)"""
+    """
+    Read object custom property.
+    """
     try:
         return obj.get(key, default)
     except Exception:
@@ -181,8 +272,24 @@ def get_obj_prop(obj, key: str, default=None):
 
 
 def set_obj_prop(obj, key: str, value):
-    """设置对象自定义属性 (占位)"""
+    """
+    Write object custom property.
+    """
     try:
         obj[key] = value
     except Exception:
         pass
+
+
+# =========================
+# Optional quaternion mapping (placeholder)
+# =========================
+
+def axis_map_y_up_to_z_up_quat(quat4: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    """
+    Quaternion mapping placeholder; if needed, implement proper basis change for rotations.
+    For now, pass-through to keep alignment without introducing errors.
+    """
+    # Note: Proper quaternion basis change would require composing with A/B rotation.
+    # Kept as pass-through until legacy spec requires exact behavior.
+    return quat4
