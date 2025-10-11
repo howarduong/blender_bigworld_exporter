@@ -1,200 +1,249 @@
-# 相对路径: core/binsection_writer.py
-# 功能: 提供二进制写出基础能力，包括大小端控制、类型写出、
-#       对齐（4/8/16）、块写出（开始/回填长度/结束）、字符串与数组写出。
+# -*- coding: utf-8 -*-
+"""
+BigWorld Blender Exporter - BinSection Writer (strictly aligned)
+
+- Centralizes binary writing with explicit endianness and alignment control
+- Manages sections: begin/end, logical key -> numeric ID mapping, names
+- Provides scalar writers (u8/u16/u32/i32/f32), bytes, fixed-length strings, cstrings
+- Ensures consistent structure across all writers (no ad-hoc file layout)
+- Keeps placeholders and reserved fields intact (no omissions)
+
+Author: Blender 4.5.3 adaptation team
+"""
 
 from __future__ import annotations
-from typing import BinaryIO, Iterable, Optional, Tuple
+import io
+import os
 import struct
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, BinaryIO, Iterator, Tuple
 
 
-class BinWriter:
-    """二进制写出器：控制大小端、对齐与常用类型写出"""
+# =========================
+# Endianness / alignment
+# =========================
 
-    def __init__(self, f: BinaryIO, little_endian: bool = True, default_align: int = 4):
-        self.f = f
-        self.le = little_endian
-        self.default_align = default_align
+@dataclass
+class BinaryWriter:
+    """
+    Minimalistic binary writer with explicit endianness and alignment padding.
+    """
+    stream: BinaryIO
+    little_endian: bool = True
 
-    # =========================
-    # 位置与对齐
-    # =========================
-    def tell(self) -> int:
-        return self.f.tell()
+    # ---- scalar writers ----
+    def write_u8(self, v: int) -> None:
+        self.stream.write(struct.pack('<B' if self.little_endian else '>B', v & 0xFF))
 
-    def seek(self, pos: int):
-        self.f.seek(pos)
+    def write_u16(self, v: int) -> None:
+        self.stream.write(struct.pack('<H' if self.little_endian else '>H', v & 0xFFFF))
 
-    def pad_align(self, boundary: Optional[int] = None):
-        boundary = boundary or self.default_align
-        pos = self.tell()
-        pad = (-pos) % boundary
+    def write_u32(self, v: int) -> None:
+        self.stream.write(struct.pack('<I' if self.little_endian else '>I', v & 0xFFFFFFFF))
+
+    def write_i32(self, v: int) -> None:
+        self.stream.write(struct.pack('<i' if self.little_endian else '>i', int(v)))
+
+    def write_f32(self, v: float) -> None:
+        self.stream.write(struct.pack('<f' if self.little_endian else '>f', float(v)))
+
+    # ---- bulk writers ----
+    def write_bytes(self, data: bytes) -> None:
+        self.stream.write(data)
+
+    def write_cstring(self, s: str) -> None:
+        """
+        Write zero-terminated string (UTF-8). No length prefix.
+        """
+        self.stream.write(s.encode('utf-8'))
+        self.stream.write(b'\x00')
+
+    def align(self, boundary: int) -> None:
+        """
+        Align to 'boundary' bytes by writing zero padding.
+        """
+        pos = self.stream.tell()
+        pad = (boundary - (pos % boundary)) % boundary
         if pad:
-            self.f.write(b"\x00" * pad)
-
-    # =========================
-    # 原始写入
-    # =========================
-    def write_bytes(self, data: bytes):
-        self.f.write(data)
-
-    # =========================
-    # 基础类型写出
-    # =========================
-    def _fmt(self, code: str) -> str:
-        return ("<" if self.le else ">") + code
-
-    def write_u8(self, v: int):
-        self.f.write(struct.pack(self._fmt("B"), v & 0xFF))
-
-    def write_i8(self, v: int):
-        self.f.write(struct.pack(self._fmt("b"), v))
-
-    def write_u16(self, v: int):
-        self.f.write(struct.pack(self._fmt("H"), v & 0xFFFF))
-
-    def write_i16(self, v: int):
-        self.f.write(struct.pack(self._fmt("h"), v))
-
-    def write_u32(self, v: int):
-        self.f.write(struct.pack(self._fmt("I"), v & 0xFFFFFFFF))
-
-    def write_i32(self, v: int):
-        self.f.write(struct.pack(self._fmt("i"), v))
-
-    def write_u64(self, v: int):
-        self.f.write(struct.pack(self._fmt("Q"), v & 0xFFFFFFFFFFFFFFFF))
-
-    def write_i64(self, v: int):
-        self.f.write(struct.pack(self._fmt("q"), v))
-
-    def write_f16(self, v: float):
-        f32 = struct.pack(self._fmt("f"), float(v))
-        f32_i = struct.unpack(self._fmt("I"), f32)[0]
-        sign = (f32_i >> 31) & 0x1
-        exp = (f32_i >> 23) & 0xFF
-        frac = f32_i & 0x7FFFFF
-        if exp == 0:
-            h_exp = 0
-            h_frac = 0
-        elif exp == 0xFF:
-            h_exp = 0x1F
-            h_frac = 0
-        else:
-            h_exp = max(0, min(0x1F, exp - 127 + 15))
-            h_frac = frac >> (23 - 10)
-        h = (sign << 15) | (h_exp << 10) | h_frac
-        self.f.write(struct.pack(self._fmt("H"), h))
-
-    def write_f32(self, v: float):
-        self.f.write(struct.pack(self._fmt("f"), float(v)))
-
-    def write_f64(self, v: float):
-        self.f.write(struct.pack(self._fmt("d"), float(v)))
-
-    # =========================
-    # 复合类型写出
-    # =========================
-    def write_vec2f(self, v: Tuple[float, float]):
-        self.write_f32(v[0])
-        self.write_f32(v[1])
-
-    def write_vec3f(self, v: Tuple[float, float, float]):
-        self.write_f32(v[0])
-        self.write_f32(v[1])
-        self.write_f32(v[2])
-
-    def write_vec4f(self, v: Tuple[float, float, float, float]):
-        self.write_f32(v[0])
-        self.write_f32(v[1])
-        self.write_f32(v[2])
-        self.write_f32(v[3])
-
-    def write_quatf(self, q: Tuple[float, float, float, float]):
-        self.write_f32(q[0])
-        self.write_f32(q[1])
-        self.write_f32(q[2])
-        self.write_f32(q[3])
-
-    def write_mat3x3f(self, m: Iterable[float]):
-        for x in m:
-            self.write_f32(float(x))
-
-    def write_mat4x4f(self, m: Iterable[float]):
-        for x in m:
-            self.write_f32(float(x))
-
-    # =========================
-    # 字符串写出
-    # =========================
-    def write_cstring(self, s: str, encoding: str = "utf-8"):
-        b = s.encode(encoding)
-        self.write_bytes(b)
-        self.write_bytes(b"\x00")
-
-    def write_pascal_string(self, s: str, encoding: str = "utf-8"):
-        b = s.encode(encoding)
-        self.write_u32(len(b))
-        self.write_bytes(b)
-
-    # =========================
-    # 数组写出
-    # =========================
-    def write_u16_array(self, arr: Iterable[int]):
-        for v in arr:
-            self.write_u16(int(v))
-
-    def write_u32_array(self, arr: Iterable[int]):
-        for v in arr:
-            self.write_u32(int(v))
-
-    def write_f32_array(self, arr: Iterable[float]):
-        for v in arr:
-            self.write_f32(float(v))
+            self.stream.write(b'\x00' * pad)
 
 
-class SectionWriter:
-    """块写出器"""
+# =========================
+# Section registry and writer
+# =========================
 
-    def __init__(self, binw: BinWriter, align: Optional[int] = None):
-        self.binw = binw
-        self.align = align
-        self._len_pos_stack = []
-        self._start_pos_stack = []
+class SectionRegistry:
+    """
+    Logical-key -> numeric ID mapping registry.
+    Keep IDs aligned with legacy Max plugin output.
+    """
+    def __init__(self):
+        # Default mapping; adjust per legacy spec if needed.
+        self._map: Dict[str, int] = {
+            # Primitives
+            "PRIM_VERTICES":      0x1001,
+            "PRIM_INDICES":       0x1002,
 
-    def begin_section(self, section_id: int):
-        self.binw.write_u32(section_id)
-        len_pos = self.binw.tell()
-        self.binw.write_u32(0xDEADBEEF)
-        start_pos = self.binw.tell()
-        self._len_pos_stack.append(len_pos)
-        self._start_pos_stack.append(start_pos)
+            # Visual
+            "VISUAL_HEADER":      0x2001,
+            "VISUAL_LOD":         0x2002,
+            "VISUAL_MATERIALS":   0x2003,
 
-    def end_section(self):
-        if not self._len_pos_stack or not self._start_pos_stack:
-            raise RuntimeError("end_section called without matching begin_section")
+            # Model
+            "MODEL_HEADER":       0x3001,
+            "MODEL_NODETREE":     0x3002,
+            "MODEL_REFERENCES":   0x3003,
 
-        current_pos = self.binw.tell()
-        start_pos = self._start_pos_stack.pop()
-        len_pos = self._len_pos_stack.pop()
+            # Skeleton
+            "SKELETON_MAIN":      0x4001,
+            "SKELETON_HARDPOINTS":0x4002,
 
-        total_len = current_pos - start_pos
+            # Animation
+            "ANIM_MAIN":          0x5001,
+            "ANIM_CUE":           0x5002,
 
-        back = self.binw.tell()
-        self.binw.seek(len_pos)
-        self.binw.write_u32(total_len)
-        self.binw.seek(back)
+            # Collision
+            "COLLISION_HEADER":   0x6001,
+            "COLLISION_MESH":     0x6002,
+            "COLLISION_GROUPS":   0x6003,
+            "COLLISION_BSP":      0x6004,  # placeholder
+            "COLLISION_CONVEX":   0x6005,  # placeholder
 
-        self.binw.pad_align(self.align or self.binw.default_align)
+            # Prefab
+            "PREFAB_MAIN":        0x7001,
+        }
+
+    def get_id(self, key: str) -> int:
+        if key not in self._map:
+            raise KeyError(f"Section key '{key}' not registered in SectionRegistry.")
+        return self._map[key]
+
+    def set_id(self, key: str, value: int) -> None:
+        """
+        Override or add mapping to match exact legacy outputs.
+        """
+        self._map[key] = int(value)
+
+    def contains(self, key: str) -> bool:
+        return key in self._map
 
 
-class BWHeaderWriter:
-    """BigWorld 文件头写出助手"""
+class BinSectionWriter:
+    """
+    Manages file creation and section framing:
+    - open(path): returns context manager; ensures file is created and stream ready
+    - begin_section(key): writes section header (ID + placeholder size)
+    - end_section(): patches section size based on content written
+    - Uses BinaryWriter for content serialization within sections
+    """
 
-    def __init__(self, binw: BinWriter):
-        self.binw = binw
+    def __init__(self, registry: Optional[SectionRegistry] = None, little_endian: bool = True, align_boundary: int = 4):
+        self.registry = registry or SectionRegistry()
+        self.little_endian = little_endian
+        self.align_boundary = align_boundary
 
-    def write_header(self, magic: bytes, version: int):
-        if not isinstance(magic, (bytes, bytearray)):
-            raise TypeError("magic must be bytes")
-        self.binw.write_bytes(magic)
-        self.binw.write_u32(int(version))
+        # Current file stream and writers
+        self._stream: Optional[BinaryIO] = None
+        self.binw: Optional[BinaryWriter] = None
+
+        # Section state
+        self._section_stack: list[Tuple[int, int]] = []  # [(start_pos, id)]
+        self._closed: bool = True
+
+    # ---- file management ----
+    def open(self, path: str) -> 'BinSectionWriter':
+        """
+        Context manager: open file for binary write, set up BinaryWriter.
+        Usage:
+          with binsection.open(path) as secw:
+              secw.begin_section("PRIM_VERTICES")
+              ...
+              secw.end_section()
+        """
+        class _Context:
+            def __init__(self, outer: BinSectionWriter, target_path: str):
+                self._outer = outer
+                self._path = target_path
+
+            def __enter__(self):
+                self._outer._open_stream(self._path)
+                return self._outer
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                self._outer._close_stream()
+
+        return _Context(self, path)
+
+    def _open_stream(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._stream = open(path, 'wb')
+        self.binw = BinaryWriter(self._stream, little_endian=self.little_endian)
+        self._closed = False
+
+    def _close_stream(self) -> None:
+        # Ensure all sections properly closed
+        if self._section_stack:
+            raise RuntimeError("Unclosed sections detected on close. Ensure end_section() is called for every begin_section().")
+        if self._stream:
+            self._stream.flush()
+            self._stream.close()
+        self._stream = None
+        self.binw = None
+        self._closed = True
+
+    # ---- section framing ----
+    def begin_section(self, key: str) -> None:
+        """
+        Write section header:
+        - u32: section ID
+        - u32: section size placeholder (to be patched on end_section)
+        Followed by aligned content.
+        """
+        if self._closed or self._stream is None or self.binw is None:
+            raise RuntimeError("Stream not open. Use 'with binsection.open(path) as secw:' to begin sections.")
+
+        sec_id = self.registry.get_id(key)
+
+        # Write header
+        self.binw.write_u32(sec_id)
+        # Placeholder for size; record position to back-patch
+        size_pos = self._stream.tell()
+        self.binw.write_u32(0)
+
+        # Align content start if required
+        self.binw.align(self.align_boundary)
+
+        # Push state
+        self._section_stack.append((size_pos, sec_id))
+
+    def end_section(self) -> None:
+        """
+        Patch the section size in bytes (from after size field to current position),
+        then align to boundary for next section header.
+        """
+        if not self._section_stack:
+            raise RuntimeError("end_section() called without a matching begin_section().")
+
+        # Pop current section
+        size_pos, sec_id = self._section_stack.pop()
+
+        cur_pos = self._stream.tell()
+        # Section content begins after the placeholder (4 bytes) + alignment padding already applied
+        # To compute size: read the position just after size field, then subtract from current.
+        # For simplicity, we stored the placeholder position (size_pos). Content starts at:
+        content_start = size_pos + 4  # immediately after size field; any internal alignment already occurred
+
+        # Compute size
+        size_bytes = cur_pos - content_start
+
+        # Patch size
+        # Save current position
+        after_pos = self._stream.tell()
+        # Seek to size_pos and write size
+        self._stream.seek(size_pos)
+        self.binw.write_u32(size_bytes)
+        # Seek back
+        self._stream.seek(after_pos)
+
+        # Align for next section header
+        self.binw.align(self.align_boundary)
