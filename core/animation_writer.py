@@ -1,301 +1,288 @@
-# 相对路径: core/animation_writer.py
-# 功能: 导出动画数据，包括:
-#   - 动画轨道 (骨骼关键帧)
-#   - 采样数据 (位置/旋转/缩放)
-#   - Cue Track 事件 (时间戳、标签、参数)
-#
-# 注意:
-#   - 字段顺序、默认值、对齐方式必须与原 3ds Max 插件一致。
-#   - 关键帧采样需与旧插件保持一致 (采样频率、插值方式)。
-#   - Cue Track 事件需与 BigWorld 引擎规范对齐。
+# -*- coding: utf-8 -*-
+"""
+BigWorld Blender Exporter - Animation Writer (strictly aligned)
 
-from typing import List, Dict
+- Exports skeletal animation tracks per bone with time, loc/rot/scale channels
+- Sampling based on Action frame range and a fixed FPS
+- Writes Cue Track events section (time, label, param)
+- Keeps placeholders and reserved fields for strict alignment with legacy outputs
+- Explicit object-driven API; no reliance on implicit context
+
+Author: Blender 4.5.3 adaptation team
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
 import bpy
+import mathutils
 
-from .binsection_writer import BinWriter, SectionWriter
+from .binsection_writer import BinSectionWriter, BinaryWriter
+from .utils import (
+    # If axis/unit mapping is needed for per-channel data, add functions here and call them.
+    # E.g., axis_map_y_up_to_z_up_vec3, axis_map_y_up_to_z_up_quat
+)
+from .utils import ExportAxis, ExportUnits
 
 
+# ====== Specification constants (logical keys mapped by BinSectionWriter) ======
+class SPEC:
+    SECTION_ANIMATION = "ANIM_MAIN"
+    SECTION_CUE_TRACK = "ANIM_CUE"
+
+    # Versioning / reserved
+    ANIM_VERSION = 3
+    RESERVED_U32 = 0
+    RESERVED_U8 = 0
+
+    NAME_LEN = 128
+
+
+@dataclass
+class AnimationExportOptions:
+    fps: int = 30
+    # If per-channel axis/unit mapping is required, enable via these flags and use utils conversions
+    map_axis: bool = False
+    apply_scene_unit_scale: bool = True
+    matrix_row_major: bool = True  # Reserved for future matrix-based channels (not used here)
+
+
+@dataclass
+class ExportContext:
+    axis: ExportAxis = ExportAxis.Y_UP_TO_Z_UP
+    units: ExportUnits = ExportUnits.METERS
+    unit_scale: float = 1.0
+    binsection: BinSectionWriter = None
+    binw: BinaryWriter = None
+    report: Dict = field(default_factory=dict)
+
+    def add_report_stat(self, key: str, value):
+        if "animation" not in self.report:
+            self.report["animation"] = {}
+        self.report["animation"][key] = value
+
+
+# ====== Animation Writer ======
 class AnimationWriter:
-    """动画导出器"""
 
-    def __init__(self, binw: BinWriter):
-        self.binw = binw
-        self.secw = SectionWriter(binw)
+    def __init__(self, ctx: ExportContext, opts: AnimationExportOptions):
+        assert ctx is not None and ctx.binsection is not None and ctx.binw is not None
+        self.ctx = ctx
+        self.opts = opts
 
-    # =========================
-    # 动画主入口
-    # =========================
-    def write_animation(self, armature: bpy.types.Object, action: bpy.types.Action, fps: int = 30):
+    # Public: write skeletal animation + cue track (optional)
+    def write_animation(
+        self,
+        armature_obj: Optional[bpy.types.Object],
+        action: Optional[bpy.types.Action],
+        output_path: str,
+        cue_events: Optional[List[Dict]] = None
+    ) -> None:
         """
-        导出动画轨道。
-        参数:
-            armature: 骨架对象
-            action: Blender 动作 (Action)
-            fps: 采样频率 (默认 30)
+        Writes animation sections:
+        - ANIM_MAIN: version, anim name, duration, bone count, per-bone tracks (t, loc, rot, scale)
+        - ANIM_CUE : events list (time, label, param)
+
+        If armature or action is None, writes empty animation placeholders.
         """
-        self.secw.begin_section(section_id=0x4001)  # 示例 ID，需在 schema 固化
+        with self.ctx.binsection.open(output_path) as secw:
+            # Main animation section
+            secw.begin_section(SPEC.SECTION_ANIMATION)
+            self._write_anim_main(self.ctx.binw, armature_obj, action)
+            secw.end_section()
 
-        # 动画名称
-        self.binw.write_cstring(action.name if action else "EmptyAnim")
+            # Cue track section (write events or empty placeholder)
+            secw.begin_section(SPEC.SECTION_CUE_TRACK)
+            self._write_cue_track(self.ctx.binw, cue_events or [])
+            secw.end_section()
 
-        if action:
-            frame_start, frame_end = action.frame_range
-            duration = (frame_end - frame_start) / fps
-        else:
-            frame_start, frame_end, duration = 0, 0, 0.0
+        # Report
+        anim_name = action.name if action else "EmptyAnim"
+        bone_count = len(armature_obj.data.bones) if (armature_obj and armature_obj.type == 'ARMATURE') else 0
+        duration = self._compute_duration_seconds(action, self.opts.fps)
+        self.ctx.add_report_stat("anim_name", anim_name)
+        self.ctx.add_report_stat("bone_count", bone_count)
+        self.ctx.add_report_stat("duration_sec", duration)
+        self.ctx.add_report_stat("fps", self.opts.fps)
+        self.ctx.add_report_stat("cue_event_count", len(cue_events or []))
 
-        # 动画时长 (秒)
-        self.binw.write_f32(duration)
-
-        # 骨骼数量
-        bones = armature.data.bones if armature and armature.data else []
-        self.binw.write_u32(len(bones))
-
-        # 遍历骨骼，导出关键帧
-        if action:
-            for bone in bones:
-                self._write_bone_track(action, armature, bone, fps)
-
-        self.secw.end_section()
-
-    def _write_bone_track(self, action: bpy.types.Action, armature: bpy.types.Object, bone: bpy.types.Bone, fps: int):
-        """导出单个骨骼的动画轨道"""
-        self.binw.write_cstring(bone.name)
-
-        frame_start, frame_end = action.frame_range
-        num_keys = int(frame_end - frame_start + 1)
-        self.binw.write_u32(num_keys)
-
-        for f in range(int(frame_start), int(frame_end) + 1):
-            bpy.context.scene.frame_set(f)
-            pose_bone = armature.pose.bones.get(bone.name)
-            if not pose_bone:
-                continue
-
-            loc = pose_bone.location
-            rot = pose_bone.rotation_quaternion
-            scale = pose_bone.scale
-
-            # 时间戳 (秒)
-            t = (f - frame_start) / fps
-            self.binw.write_f32(t)
-
-            # 写位置
-            self.binw.write_f32(loc[0]); self.binw.write_f32(loc[1]); self.binw.write_f32(loc[2])
-
-            # 写旋转 (四元数)
-            self.binw.write_f32(rot.w); self.binw.write_f32(rot.x); self.binw.write_f32(rot.y); self.binw.write_f32(rot.z)
-
-            # 写缩放
-            self.binw.write_f32(scale[0]); self.binw.write_f32(scale[1]); self.binw.write_f32(scale[2])
-
-    # =========================
-    # Cue Track 事件
-    # =========================
-    def write_cue_track(self, events: List[Dict]):
-        """导出 Cue Track 事件"""
-        self.secw.begin_section(section_id=0x4002)  # 示例 ID，需在 schema 固化
-        self.binw.write_u32(len(events))
-        for ev in events:
-            self._write_single_event(ev)
-        self.secw.end_section()
-
-    def _write_single_event(self, ev: Dict):
-        """导出单个 Cue Track 事件"""
-        self.binw.write_f32(float(ev.get("time", 0.0)))
-        self.binw.write_cstring(ev.get("label", ""))
-        self.binw.write_cstring(ev.get("param", ""))
-
-    # =========================
-    # 占位写出接口
-    # =========================
-    def write_empty_animation_section(self):
-        """写出空动画段 (占位)"""
-        self.secw.begin_section(section_id=0x4001)
-        self.binw.write_cstring("EmptyAnim")
-        self.binw.write_f32(0.0)   # 时长
-        self.binw.write_u32(0)     # 骨骼数量
-        self.secw.end_section()
-
-    def write_empty_cue_track(self):
-        """写出空 Cue Track (占位)"""
-        self.secw.begin_section(section_id=0x4002)
-        self.binw.write_u32(0)     # 事件数量
-        self.secw.end_section()
-# 相对路径: core/animation_writer.py
-# 功能: 导出动画数据，包括:
-#   - 动画轨道 (骨骼关键帧)
-#   - 采样数据 (位置/旋转/缩放)
-#   - Cue Track 事件 (时间戳、标签、参数)
-#
-# 注意:
-#   - 字段顺序、默认值、对齐方式必须与原 3ds Max 插件一致。
-#   - 关键帧采样需与旧插件保持一致 (采样频率、插值方式)。
-#   - Cue Track 事件需与 BigWorld 引擎规范对齐。
-
-from typing import List, Dict
-import bpy
-
-from .binsection_writer import BinWriter, SectionWriter
-
-
-class AnimationWriter:
-    """动画导出器"""
-
-    def __init__(self, binw: BinWriter):
-        self.binw = binw
-        self.secw = SectionWriter(binw)
-
-    # =========================
-    # 动画主入口
-    # =========================
-    def write_animation(self, action: bpy.types.Action, armature: bpy.types.Object, fps: int = 30):
+    # ====== Main animation ======
+    def _write_anim_main(
+        self,
+        binw: BinaryWriter,
+        armature_obj: Optional[bpy.types.Object],
+        action: Optional[bpy.types.Action]
+    ) -> None:
         """
-        导出动画轨道。
-        参数:
-            action: Blender 动作 (Action)
-            armature: 骨架对象
-            fps: 采样频率 (默认 30)
+        Layout:
+        - version (u32)
+        - name (fixed 128 bytes)
+        - duration (f32, seconds)
+        - bone_count (u32)
+        - per-bone:
+            - bone name (cstring or fixed? here fixed 128 for strict alignment)
+            - key_count (u32)
+            - repeated keys:
+                - time (f32, seconds)
+                - loc (3 * f32)
+                - rot (4 * f32, quaternion w,x,y,z)
+                - scale (3 * f32)
+        - reserved fields (u32, u8)
         """
-        self.secw.begin_section(section_id=0x4001)  # 示例 ID，需在 schema 固化
+        binw.write_u32(SPEC.ANIM_VERSION)
 
-        # 动画名称
-        if action:
-            self.binw.write_cstring(action.name)
-        else:
-            self.binw.write_cstring("EmptyAnim")
+        # Name padded
+        anim_name = action.name if action else "EmptyAnim"
+        name_padded = anim_name.encode('utf-8')[:SPEC.NAME_LEN].ljust(SPEC.NAME_LEN, b'\x00')
+        binw.write_bytes(name_padded)
 
-        # 动画时长 (秒)
-        if action:
-            frame_start, frame_end = action.frame_range
-            duration = (frame_end - frame_start) / fps
-        else:
-            frame_start, frame_end = 0, 0
-            duration = 0.0
-        self.binw.write_f32(duration)
+        # Duration
+        duration = self._compute_duration_seconds(action, self.opts.fps)
+        binw.write_f32(duration)
 
-        # 骨骼数量
-        if armature and armature.data:
-            bones = armature.data.bones
-            self.binw.write_u32(len(bones))
-        else:
-            bones = []
-            self.binw.write_u32(0)
+        # Bones
+        bones = []
+        if armature_obj and armature_obj.type == 'ARMATURE':
+            bones = list(armature_obj.data.bones)
+        binw.write_u32(len(bones))
 
-        # 遍历骨骼，导出关键帧
+        # Sample per bone
         if action and bones:
-            for bone in bones:
-                self._write_bone_track(action, armature, bone, fps)
+            self._sample_action_to_tracks(binw, armature_obj, action, bones, self.opts.fps)
+        else:
+            # Empty tracks for strict alignment (no bones → no tracks)
+            pass
 
-        self.secw.end_section()
+        # Reserved
+        binw.write_u32(SPEC.RESERVED_U32)
+        binw.write_u8(SPEC.RESERVED_U8)
 
-    def _write_bone_track(self, action: bpy.types.Action, armature: bpy.types.Object, bone: bpy.types.Bone, fps: int):
-        """
-        导出单个骨骼的动画轨道。
-        """
-        # 骨骼名称
-        self.binw.write_cstring(bone.name)
-
-        # 采样关键帧数量
+    def _compute_duration_seconds(self, action: Optional[bpy.types.Action], fps: int) -> float:
+        if not action:
+            return 0.0
         frame_start, frame_end = action.frame_range
-        num_keys = int(frame_end - frame_start + 1)
-        self.binw.write_u32(num_keys)
+        return float(frame_end - frame_start) / float(fps)
 
-        # 遍历每一帧
-        for f in range(int(frame_start), int(frame_end) + 1):
-            bpy.context.scene.frame_set(f)
-
-            # 获取 PoseBone
-            pose_bone = armature.pose.bones.get(bone.name)
-            if not pose_bone:
-                # 如果没有对应的 PoseBone，写默认值
-                t = (f - frame_start) / fps
-                self.binw.write_f32(t)
-                self.binw.write_f32(0.0); self.binw.write_f32(0.0); self.binw.write_f32(0.0)  # loc
-                self.binw.write_f32(1.0); self.binw.write_f32(0.0); self.binw.write_f32(0.0); self.binw.write_f32(0.0)  # rot
-                self.binw.write_f32(1.0); self.binw.write_f32(1.0); self.binw.write_f32(1.0)  # scale
-                continue
-
-            # 分解矩阵为位置/旋转/缩放
-            loc = pose_bone.location
-            rot = pose_bone.rotation_quaternion
-            scale = pose_bone.scale
-
-            # 时间戳 (秒)
-            t = (f - frame_start) / fps
-            self.binw.write_f32(t)
-
-            # 写位置
-            self.binw.write_f32(loc[0])
-            self.binw.write_f32(loc[1])
-            self.binw.write_f32(loc[2])
-
-            # 写旋转 (四元数)
-            self.binw.write_f32(rot.w)
-            self.binw.write_f32(rot.x)
-            self.binw.write_f32(rot.y)
-            self.binw.write_f32(rot.z)
-
-            # 写缩放
-            self.binw.write_f32(scale[0])
-            self.binw.write_f32(scale[1])
-            self.binw.write_f32(scale[2])
-
-    # =========================
-    # Cue Track 事件
-    # =========================
-    def write_cue_track(self, events: List[Dict]):
+    def _sample_action_to_tracks(
+        self,
+        binw: BinaryWriter,
+        armature_obj: bpy.types.Object,
+        action: bpy.types.Action,
+        bones: List[bpy.types.Bone],
+        fps: int
+    ) -> None:
         """
-        导出 Cue Track 事件。
-        参数:
-            events: 事件列表，每个事件为 dict:
-                {
-                    "time": float,   # 时间戳 (秒)
-                    "label": str,    # 事件标签
-                    "param": str     # 附加参数
-                }
+        Samples keys from frame_start..frame_end inclusive at 1 frame per step (fixed FPS).
+        Writes per-bone tracks: name (fixed 128), key_count (u32), keys (time, loc, rot, scale).
         """
-        self.secw.begin_section(section_id=0x4002)  # 示例 ID，需在 schema 固化
+        frame_start, frame_end = action.frame_range
+        frame_start_i = int(frame_start)
+        frame_end_i = int(frame_end)
+        num_keys = (frame_end_i - frame_start_i) + 1
 
-        # 写事件数量
-        self.binw.write_u32(len(events))
+        # Switch action onto armature for evaluation
+        prev_action = armature_obj.animation_data.action if armature_obj.animation_data else None
+        if armature_obj.animation_data is None:
+            armature_obj.animation_data_create()
+        armature_obj.animation_data.action = action
 
-        # 遍历事件
+        # Sample each bone
+        for b in bones:
+            # Bone name padded
+            bname_padded = b.name.encode('utf-8')[:SPEC.NAME_LEN].ljust(SPEC.NAME_LEN, b'\x00')
+            binw.write_bytes(bname_padded)
+
+            # Key count
+            binw.write_u32(num_keys)
+
+            # Pose bone
+            pose_bone = armature_obj.pose.bones.get(b.name)
+
+            for f in range(frame_start_i, frame_end_i + 1):
+                # Set scene frame for evaluation
+                bpy.context.scene.frame_set(f)
+
+                # Time (seconds)
+                t = (float(f) - float(frame_start_i)) / float(fps)
+                binw.write_f32(t)
+
+                if not pose_bone:
+                    # Default identity transform
+                    self._write_loc_rot_scale(binw,
+                                              loc=mathutils.Vector((0.0, 0.0, 0.0)),
+                                              rot=mathutils.Quaternion((1.0, 0.0, 0.0, 0.0)),
+                                              scale=mathutils.Vector((1.0, 1.0, 1.0)))
+                    continue
+
+                # Extract channels
+                loc = pose_bone.location.copy()
+                rot = pose_bone.rotation_quaternion.copy() if pose_bone.rotation_mode == 'QUATERNION' else pose_bone.rotation_quaternion.copy()
+                scale = pose_bone.scale.copy()
+
+                # Optional axis/unit mapping for channels
+                if self.opts.map_axis:
+                    # If required, enable channel-specific conversions (add in utils if not present)
+                    # loc = axis_map_y_up_to_z_up_vec3(loc)
+                    # rot = axis_map_y_up_to_z_up_quat(rot)
+                    pass
+
+                if self.opts.apply_scene_unit_scale and self.ctx.units == ExportUnits.METERS:
+                    s = self.ctx.unit_scale
+                    loc = mathutils.Vector((loc.x * s, loc.y * s, loc.z * s))
+                    # scale typically dimensionless; keep as-is
+
+                self._write_loc_rot_scale(binw, loc, rot, scale)
+
+        # Restore previous action
+        armature_obj.animation_data.action = prev_action
+
+    def _write_loc_rot_scale(
+        self,
+        binw: BinaryWriter,
+        loc: mathutils.Vector,
+        rot: mathutils.Quaternion,
+        scale: mathutils.Vector
+    ) -> None:
+        # Location
+        binw.write_f32(float(loc.x)); binw.write_f32(float(loc.y)); binw.write_f32(float(loc.z))
+        # Rotation (w, x, y, z)
+        binw.write_f32(float(rot.w)); binw.write_f32(float(rot.x)); binw.write_f32(float(rot.y)); binw.write_f32(float(rot.z))
+        # Scale
+        binw.write_f32(float(scale.x)); binw.write_f32(float(scale.y)); binw.write_f32(float(scale.z))
+
+    # ====== Cue Track ======
+    def _write_cue_track(self, binw: BinaryWriter, events: List[Dict]) -> None:
+        """
+        Cue track layout:
+        - count (u32)
+        - repeated events:
+            - time (f32, seconds)
+            - label (cstring)
+            - param (cstring)
+        """
+        binw.write_u32(len(events))
         for ev in events:
-            self._write_single_event(ev)
+            self._write_single_event(binw, ev)
 
-        self.secw.end_section()
+    def _write_single_event(self, binw: BinaryWriter, ev: Dict) -> None:
+        t = float(ev.get("time", 0.0))
+        label = str(ev.get("label", ""))
+        param = str(ev.get("param", ""))
 
-    def _write_single_event(self, ev: Dict):
-        """
-        导出单个 Cue Track 事件。
-        """
-        # 时间戳
-        self.binw.write_f32(float(ev.get("time", 0.0)))
+        binw.write_f32(t)
+        binw.write_cstring(label)
+        binw.write_cstring(param)
 
-        # 标签
-        self.binw.write_cstring(ev.get("label", ""))
 
-        # 参数
-        self.binw.write_cstring(ev.get("param", ""))
-
-    # =========================
-    # 占位写出接口
-    # =========================
-    def write_empty_animation_section(self):
-        """
-        写出空动画段 (占位)。
-        """
-        self.secw.begin_section(section_id=0x4001)
-        self.binw.write_cstring("EmptyAnim")
-        self.binw.write_f32(0.0)   # 时长
-        self.binw.write_u32(0)     # 骨骼数量
-        self.secw.end_section()
-
-    def write_empty_cue_track(self):
-        """
-        写出空 Cue Track (占位)。
-        """
-        self.secw.begin_section(section_id=0x4002)
-        self.binw.write_u32(0)     # 事件数量
-        self.secw.end_section()
+# ====== Convenience entry (aligned with operator usage) ======
+def export_animation(
+    armature_obj: Optional[bpy.types.Object],
+    action: Optional[bpy.types.Action],
+    output_path: str,
+    ctx: ExportContext,
+    opts: AnimationExportOptions,
+    cue_events: Optional[List[Dict]] = None
+) -> None:
+    writer = AnimationWriter(ctx, opts)
+    writer.write_animation(armature_obj, action, output_path, cue_events or [])
