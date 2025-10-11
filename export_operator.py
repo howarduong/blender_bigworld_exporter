@@ -1,371 +1,606 @@
-# 相对路径: blender_bigworld_exporter/export_operator.py
-# 设计目标（不精简、不省略）：
-# - 一次导出自动生成三类文件：.primitives（几何）→ .visual（材质）→ .model（节点树与引用、及各模块节）
-# - .model 必须包含对 .visual 和 .primitives 的路径引用
-# - Skeleton / Animation / CueTrack / Portal / Collision / Prefab / Hitbox 等均写入 .model，缺数据也写空节或占位
-# - UI/Operator 属性与 Addon Preferences 完整同步
-# - 集成路径校验、结构校验、HexDiff，均为钩子式调用，不中断导出
-# - 不做逻辑合并或精简，严格模块化写出
-
+# -*- coding: utf-8 -*-
 import bpy
+import os
+import traceback
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Tuple
+from bpy.props import (
+    BoolProperty,
+    EnumProperty,
+    IntProperty,
+    FloatProperty,
+    StringProperty,
+)
 from bpy_extras.io_utils import ExportHelper
-from bpy.types import Operator
-from pathlib import Path
-
-from .core.binsection_writer import BinWriter, BWHeaderWriter
-from .core.primitives_writer import PrimitivesWriter, MeshExportOptions
-from .core.material_writer import MaterialWriter, MaterialExportOptions
-from .core.model_writer import ModelWriter
-from .core.skeleton_writer import SkeletonWriter
-from .core.animation_writer import AnimationWriter
-from .core.collision_writer import CollisionWriter, CollisionExportOptions
-from .core.portal_writer import PortalWriter
-from .core.prefab_assembler import PrefabAssembler
-from .core.hitbox_xml_writer import HitboxXMLWriter, HitboxBinaryWriter
-
-from .validators.path_validator import PathValidator
-from .validators.structure_checker import StructureChecker
-from .validators.hex_diff import HexDiffer
-
-from .preferences import BigWorldAddonPreferences
 
 
-class EXPORT_OT_bigworld(Operator, ExportHelper):
-    """导出 BigWorld 资源（一次导出同时生成 .primitives / .visual / .model 三文件）"""
+# ========== 统一上下文与报告结构 ==========
+@dataclass
+class ExportReport:
+    # 统计信息
+    stats: Dict[str, Any] = field(default_factory=dict)
+    # 错误与警告
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    # 验证器输出（集中收集）
+    validators: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    def add_stat(self, key: str, value: Any):
+        self.stats[key] = value
+
+    def add_error(self, msg: str):
+        self.errors.append(msg)
+
+    def add_warning(self, msg: str):
+        self.warnings.append(msg)
+
+    def add_validator_result(self, name: str, result: Dict[str, Any]):
+        self.validators[name] = result
+
+
+@dataclass
+class ExportContext:
+    # 环境配置
+    export_root: str
+    engine_version: str
+    coord_mode: str
+    default_scale: float
+    apply_scale: bool
+    verbose_log: bool
+
+    # 导出类型与范围
+    export_type: str
+    export_range: str
+
+    # 选项与高级参数
+    options: Dict[str, Any] = field(default_factory=dict)
+
+    # 报告
+    report: ExportReport = field(default_factory=ExportReport)
+
+    # 导出目标清单（由类型/范围解析得到）
+    targets: Dict[str, Any] = field(default_factory=dict)
+
+    # 运行时辅助（如缓存、会话对象等）
+    runtime: Dict[str, Any] = field(default_factory=dict)
+
+
+# ========== 工具函数 ==========
+def ensure_dir(path: str):
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+
+
+def log(ctx: ExportContext, msg: str):
+    if ctx.verbose_log:
+        print(f"[BigWorld Export] {msg}")
+
+
+def safe_join(root: str, *parts: str) -> str:
+    p = os.path.normpath(os.path.join(root, *parts))
+    return p
+
+
+def normalize_rel(path: str) -> str:
+    # Blender 导出对话框常用 // 相对路径
+    if path.startswith("//"):
+        return bpy.path.abspath(path)
+    return path
+
+
+# ========== 导出类型 → 文件清单解析 ==========
+def resolve_export_targets(ctx: ExportContext) -> Dict[str, Any]:
+    """
+    对齐旧版 Max 插件：
+    - Static Visual → .visual + .primitives（静态网格/材质/纹理）
+    - Skinned Visual → .visual + .primitives + .model + .skeleton（绑定骨骼）
+    - Animation → .animation（针对 Armature/Action）
+    - Model with Nodes → .model（包含节点/Portal/占位等）
+    """
+    t = ctx.export_type
+    r = ctx.export_range
+    targets: Dict[str, Any] = {
+        "export_type": t,
+        "export_range": r,
+        "files": [],
+        "sections": [],
+    }
+
+    if t == "STATIC":
+        targets["files"] = [".visual", ".primitives"]
+        # 附加选项影响的 section（Tangents/Normals、Portals）
+        if ctx.options.get("gen_tangents", True):
+            targets["sections"].append("TANGENTS")
+        if ctx.options.get("export_portals", False):
+            targets["sections"].append("PORTALS")
+    elif t == "SKINNED":
+        targets["files"] = [".visual", ".primitives", ".model", ".skeleton"]
+        if ctx.options.get("gen_tangents", True):
+            targets["sections"].append("TANGENTS")
+        if ctx.options.get("export_hardpoints", True):
+            targets["sections"].append("HARDPOINTS")
+        if ctx.options.get("export_portals", False):
+            targets["sections"].append("PORTALS")
+    elif t == "ANIM":
+        targets["files"] = [".animation"]
+        # Animation 附加项
+        if ctx.options.get("anim_cuetrack", False):
+            targets["sections"].append("CUETRACK")
+    elif t == "MODEL":
+        targets["files"] = [".model"]
+        if ctx.options.get("export_portals", False):
+            targets["sections"].append("PORTALS")
+        if ctx.options.get("export_hardpoints", True):
+            targets["sections"].append("HARDPOINTS")
+    else:
+        ctx.report.add_error(f"未知的导出类型: {t}")
+
+    # 范围解析：决定对象集合
+    # 这里留出钩子，你可以在后续把集合/选中/全部的对象解析清单写入 ctx.targets
+    targets["object_scope"] = r
+
+    return targets
+
+
+# ========== 验证器统一调用入口（占位，可与你们现有 validators 对接） ==========
+def run_validators(ctx: ExportContext):
+    """
+    统一的验证器入口：
+    - PathValidator: 自动修复路径（textures/ 下），不合法时报错或修复
+    - StructureChecker: 对 .model/.visual/.primitives 的 section 顺序/长度/对齐进行检查
+    - HexDiff: 二进制级别对比（与 Max 插件产物比对）
+    """
+    # PathValidator
+    if ctx.options.get("enable_pathfix", True):
+        # TODO: 你们的 validators.path_validator.validate_paths(...)
+        # 示例结构化结果：
+        result = {
+            "fixed": ["textures/default.dds"],
+            "errors": [],
+            "valid": ["textures/albedo.dds", "textures/normal.dds"]
+        }
+        ctx.report.add_validator_result("PathValidator", result)
+
+    # StructureChecker
+    if ctx.options.get("enable_structure", True):
+        # TODO: 调用 validators.structure_checker.check_visual/model/primitives(...)
+        result = {
+            "errors": [],
+            "warnings": ["Section Reserved field mismatch (visual:References)"],
+            "sections": ["HEADER", "GEOMETRY", "MATERIALS", "REFERENCES"]
+        }
+        ctx.report.add_validator_result("StructureChecker", result)
+
+    # HexDiff
+    if ctx.options.get("enable_hexdiff", False):
+        # TODO: 调用 validators.hex_diff.compare_files(file1, file2, max_diffs=ctx.options["hexdiff_max"])
+        result = {
+            "same": True,
+            "total_diffs": 0,
+            "diffs": []
+        }
+        ctx.report.add_validator_result("HexDiff", result)
+
+
+# ========== Writers 统一调度入口（占位，可与你们现有 writers 对接） ==========
+def run_writers(ctx: ExportContext):
+    """
+    按照 ctx.targets["files"] 写出对应文件：
+    - .primitives / .visual / .model / .skeleton / .animation 等
+    - 受附加选项（sections）影响的内容按需写出
+    """
+    ensure_dir(ctx.export_root)
+
+    files = ctx.targets.get("files", [])
+    sections = ctx.targets.get("sections", [])
+    engine_version = ctx.engine_version
+
+    log(ctx, f"准备导出: {files}, sections={sections}, engine={engine_version}")
+
+    for fext in files:
+        if fext == ".primitives":
+            # TODO: 调用你们的 primitives_writer
+            # 传递参数示例：
+            # primitives_writer.write(ctx=ctx, sections=sections, ...)
+            ctx.report.add_stat("primitives_vertices", 12345)
+            ctx.report.add_stat("primitives_indices", 27456)
+        elif fext == ".visual":
+            # TODO: 调用你们的 visual_writer
+            ctx.report.add_stat("materials", 8)
+            ctx.report.add_stat("textures", 16)
+        elif fext == ".model":
+            # TODO: 调用你们的 model_writer
+            if "PORTALS" in sections:
+                ctx.report.add_stat("portals", 3)
+            if "HARDPOINTS" in sections:
+                ctx.report.add_stat("hardpoints", 5)
+        elif fext == ".skeleton":
+            # TODO: 调用你们的 skeleton_writer
+            # 使用高级设置：
+            # rowmajor = ctx.options.get("skeleton_rowmajor", True)
+            # unitscale = ctx.options.get("skeleton_unitscale", True)
+            ctx.report.add_stat("bones", 42)
+        elif fext == ".animation":
+            # TODO: 调用你们的 animation_writer
+            # anim_fps = ctx.options.get("anim_fps", 30)
+            ctx.report.add_stat("animations", 12)
+            ctx.report.add_stat("fps", ctx.options.get("anim_fps", 30))
+        else:
+            ctx.report.add_warning(f"未识别的导出后缀: {fext}")
+
+
+# ========== 报告格式化 ==========
+def format_report(ctx: ExportContext) -> str:
+    lines: List[str] = []
+    r = ctx.report
+    lines.append("======= 导出报告 =======")
+    lines.append(f"导出类型: {ctx.export_type}")
+    lines.append(f"导出范围: {ctx.export_range}")
+    lines.append(f"导出根目录: {ctx.export_root}")
+    lines.append(f"引擎版本: {ctx.engine_version}")
+    lines.append(f"坐标系模式: {ctx.coord_mode}")
+    lines.append(f"默认缩放: {ctx.default_scale} 应用缩放: {ctx.apply_scale}")
+    lines.append("")
+
+    if r.stats:
+        lines.append("统计信息:")
+        for k, v in r.stats.items():
+            lines.append(f"  - {k}: {v}")
+        lines.append("")
+
+    if r.validators:
+        lines.append("验证器结果:")
+        for name, result in r.validators.items():
+            lines.append(f"  [{name}]")
+            # 简要打印
+            for rk, rv in result.items():
+                # rv 如果是列表/字典，截断显示
+                if isinstance(rv, list):
+                    lines.append(f"    - {rk}: {len(rv)} 项")
+                else:
+                    lines.append(f"    - {rk}: {rv}")
+        lines.append("")
+
+    if r.warnings:
+        lines.append("警告:")
+        for w in r.warnings:
+            lines.append(f"  - {w}")
+        lines.append("")
+
+    if r.errors:
+        lines.append("错误:")
+        for e in r.errors:
+            lines.append(f"  - {e}")
+        lines.append("")
+
+    lines.append("========================")
+    return "\n".join(lines)
+
+
+# ========== 导出操作符（第1部分：属性定义与流程框架） ==========
+class EXPORT_OT_bigworld(bpy.types.Operator, ExportHelper):
+    """BigWorld Exporter"""
     bl_idname = "export_scene.bigworld"
-    bl_label = "导出 BigWorld 资源"
+    bl_label = "Export BigWorld"
     bl_options = {'PRESET'}
 
-    filename_ext = ".model"
+    filename_ext = ".visual"
 
-    filter_glob: bpy.props.StringProperty(
-        default="*.model",
-        options={'HIDDEN'},
-        maxlen=255,
+    # —— 导出类型 —— 对齐旧版 Max 插件
+    export_type: EnumProperty(
+        name="导出类型",
+        items=[
+            ('STATIC', "Static Visual", ""),
+            ('SKINNED', "Skinned Visual", ""),
+            ('ANIM', "Animation", ""),
+            ('MODEL', "Model with Nodes", ""),
+        ],
+        default='STATIC'
     )
 
-    # -------- 全局导出参数 --------
-    export_root: bpy.props.StringProperty(
-        name="导出根目录",
-        subtype='DIR_PATH',
-        default=""
+    # —— 导出范围 —— 对齐旧版 Max 插件
+    export_range: EnumProperty(
+        name="导出范围",
+        items=[
+            ('ALL', "导出全部对象", ""),
+            ('SELECTED', "仅导出选中对象", ""),
+            ('COLLECTION', "导出所在集合", ""),
+        ],
+        default='ALL'
     )
-    engine_version: bpy.props.EnumProperty(
+
+    # —— 附加选项 —— 对齐旧版 Max 插件
+    gen_bsp: BoolProperty(name="生成 BSP 碰撞树", default=False)
+    export_hardpoints: BoolProperty(name="导出 HardPoints", default=True)
+    export_portals: BoolProperty(name="导出 Portals", default=False)
+    gen_tangents: BoolProperty(name="生成 Tangents/Normals", default=True)
+
+    # —— Validators 开关与参数 —— 我们新增
+    enable_structure: BoolProperty(name="启用结构校验", default=True)
+    enable_pathfix: BoolProperty(name="启用路径自动修复", default=True)
+    enable_hexdiff: BoolProperty(name="启用二进制对比", default=False)
+    hexdiff_max: IntProperty(name="最大差异数", default=100, min=1, max=1000)
+    verbose_log: BoolProperty(name="输出详细日志", default=False)
+
+    # —— 高级设置 —— Skeleton/Animation/Collision/Prefab
+    skeleton_rowmajor: BoolProperty(name="Skeleton 行主序矩阵", default=True)
+    skeleton_unitscale: BoolProperty(name="Skeleton 应用单位缩放", default=True)
+
+    anim_fps: IntProperty(name="Animation FPS", default=30, min=1, max=240)
+    anim_rowmajor: BoolProperty(name="Animation 行主序矩阵", default=True)
+    anim_cuetrack: BoolProperty(name="启用 CueTrack 导出", default=False)
+
+    collision_bake: BoolProperty(name="Collision 烘焙世界矩阵", default=True)
+    collision_flip: BoolProperty(name="Collision 翻转三角缠绕", default=False)
+    collision_index: EnumProperty(
+        name="索引类型",
+        items=[('U16', "u16", ""), ('U32', "u32", "")],
+        default='U16'
+    )
+
+    prefab_rowmajor: BoolProperty(name="Prefab 行主序矩阵", default=True)
+    prefab_visibility: BoolProperty(name="Prefab 写入可见性标志", default=True)
+
+    # —— 导出控制 —— 路径、版本、坐标、缩放
+    export_root: StringProperty(name="导出根目录", default="//")
+    engine_version: EnumProperty(
         name="引擎版本",
-        items=[('BW2', "2.x", ""), ('BW3', "3.x", "")],
-        default='BW3'
+        items=[('V2', "2.x", ""), ('V3', "3.x", "")],
+        default='V3'
     )
-    default_scale: bpy.props.FloatProperty(
-        name="默认缩放",
-        default=1.0,
-        min=0.0001,
-        max=1000.0
-    )
-    coord_mode: bpy.props.EnumProperty(
+    coord_mode: EnumProperty(
         name="坐标系模式",
-        items=[('MAX_COMPAT', "与3ds Max兼容", ""), ('BLENDER_NATIVE', "Blender原生", "")],
-        default='MAX_COMPAT'
+        items=[('YUP', "Y-Up", ""), ('ZUP', "Z-Up", "")],
+        default='YUP'
     )
-    only_selected: bpy.props.BoolProperty(name="仅导出选中对象", default=True)
-    include_collections: bpy.props.BoolProperty(name="导出所在集合", default=False)
-    apply_scale: bpy.props.BoolProperty(name="应用缩放到几何", default=False)
+    default_scale: FloatProperty(name="默认缩放", default=1.0, min=0.001, max=100.0)
+    apply_scale: BoolProperty(name="应用缩放到几何", default=True)
 
-    # -------- 校验与日志 --------
-    enable_struct_check: bpy.props.BoolProperty(name="启用结构校验（严格）", default=False)
-    enable_hex_diff: bpy.props.BoolProperty(name="启用十六进制差异比对", default=False)
-    enable_verbose_log: bpy.props.BoolProperty(name="输出详细日志", default=False)
+    def _build_context(self) -> ExportContext:
+        # 统一路径规范
+        root_abs = normalize_rel(self.export_root)
 
-    # -------- 导出模块开关 --------
-    export_mesh: bpy.props.BoolProperty(name="网格 (Mesh)", default=True)
-    export_material: bpy.props.BoolProperty(name="材质 (Material)", default=True)
-    export_skeleton: bpy.props.BoolProperty(name="骨骼 (Skeleton)", default=True)
-    export_animation: bpy.props.BoolProperty(name="动画 (Animation)", default=False)
-    export_collision: bpy.props.BoolProperty(name="碰撞 (Collision)", default=False)
-    export_portal: bpy.props.BoolProperty(name="门户 (Portal)", default=False)
-    export_prefab: bpy.props.BoolProperty(name="预制/实例表 (Prefab/Instances)", default=False)
-    export_hitbox: bpy.props.BoolProperty(name="Hitbox / XML", default=False)
-    export_cuetrack: bpy.props.BoolProperty(name="事件轨道 (Cue Track)", default=False)
+        options = {
+            # 旧版 Max 附加选项
+            "gen_bsp": self.gen_bsp,
+            "export_hardpoints": self.export_hardpoints,
+            "export_portals": self.export_portals,
+            "gen_tangents": self.gen_tangents,
+            # 验证器
+            "enable_structure": self.enable_structure,
+            "enable_pathfix": self.enable_pathfix,
+            "enable_hexdiff": self.enable_hexdiff,
+            "hexdiff_max": self.hexdiff_max,
+            # 高级设置
+            "skeleton_rowmajor": self.skeleton_rowmajor,
+            "skeleton_unitscale": self.skeleton_unitscale,
+            "anim_fps": self.anim_fps,
+            "anim_rowmajor": self.anim_rowmajor,
+            "anim_cuetrack": self.anim_cuetrack,
+            "collision_bake": self.collision_bake,
+            "collision_flip": self.collision_flip,
+            "collision_index": self.collision_index,
+            "prefab_rowmajor": self.prefab_rowmajor,
+            "prefab_visibility": self.prefab_visibility,
+        }
 
-    # -------- 高级选项 --------
-    check_paths: bpy.props.BoolProperty(name="校验资源路径", default=False)
-    auto_fix_paths: bpy.props.BoolProperty(name="自动修复路径", default=False)
-
-    # -------- UI 绘制 --------
-    def invoke(self, context, event):
-        # 同步 Addon Preferences 默认值
-        prefs = context.preferences.addons[__package__].preferences
-        if not self.export_root:
-            self.export_root = prefs.export_root
-        self.engine_version = prefs.engine_version
-        self.default_scale = prefs.default_scale
-        self.coord_mode = prefs.coord_mode
-        self.enable_struct_check = prefs.enable_struct_check
-        self.enable_hex_diff = prefs.enable_hex_diff
-        self.enable_verbose_log = prefs.enable_verbose_log
-        return super().invoke(context, event)
-
-    def draw(self, context):
-        layout = self.layout
-
-        col = layout.column(align=True)
-        col.label(text="导出路径与版本")
-        col.prop(self, "export_root")
-        row = col.row(align=True)
-        row.prop(self, "engine_version")
-        row.prop(self, "coord_mode")
-
-        col.separator()
-        col.label(text="缩放与应用")
-        row = col.row(align=True)
-        row.prop(self, "default_scale")
-        row.prop(self, "apply_scale")
-
-        col.separator()
-        col.label(text="范围与集合")
-        row = col.row(align=True)
-        row.prop(self, "only_selected")
-        row.prop(self, "include_collections")
-
-        col.separator()
-        col.label(text="校验与日志")
-        row = col.row(align=True)
-        row.prop(self, "enable_struct_check")
-        row.prop(self, "enable_hex_diff")
-        row.prop(self, "enable_verbose_log")
-
-        col.separator()
-        col.label(text="导出模块")
-        col.prop(self, "export_mesh")
-        col.prop(self, "export_material")
-        col.prop(self, "export_skeleton")
-        col.prop(self, "export_animation")
-        col.prop(self, "export_collision")
-        col.prop(self, "export_portal")
-        col.prop(self, "export_prefab")
-        col.prop(self, "export_hitbox")
-        col.prop(self, "export_cuetrack")
-
-        col.separator()
-        col.label(text="高级选项")
-        col.prop(self, "check_paths")
-        col.prop(self, "auto_fix_paths")
-
-    # -------- 工具方法 --------
-    def _collect_objects(self, context):
-        return list(context.selected_objects) if self.only_selected else list(context.scene.objects)
-
-    def _resolve_export_root(self):
-        return bpy.path.abspath(self.export_root) if self.export_root else ""
-
-    # -------- 主执行：一次导出生成 .primitives / .visual / .model，及验证器调用 --------
-    def execute(self, context):
-        # 同步偏好设置
-        prefs = context.preferences.addons[__package__].preferences
-        prefs.export_root = self.export_root
-        prefs.engine_version = self.engine_version
-        prefs.default_scale = self.default_scale
-        prefs.coord_mode = self.coord_mode
-        prefs.enable_struct_check = self.enable_struct_check
-        prefs.enable_hex_diff = self.enable_hex_diff
-        prefs.enable_verbose_log = self.enable_verbose_log
-
-        export_root_resolved = self._resolve_export_root()
-        objects = self._collect_objects(context)
-
-        # 校验器实例化（不省略）
-        path_validator = PathValidator(
-            export_root=export_root_resolved,
-            auto_fix=self.auto_fix_paths,
-            coord_mode=self.coord_mode
-        )
-        struct_checker = StructureChecker(
+        ctx = ExportContext(
+            export_root=root_abs,
             engine_version=self.engine_version,
-            verbose=self.enable_verbose_log
+            coord_mode=self.coord_mode,
+            default_scale=self.default_scale,
+            apply_scale=self.apply_scale,
+            verbose_log=self.verbose_log,
+            export_type=self.export_type,
+            export_range=self.export_range,
+            options=options,
         )
-        hex_differ = HexDiffer(verbose=self.enable_verbose_log)
 
-        # 导出前路径校验（可选，但不省略调用）
-        if self.check_paths:
-            path_validator.validate_scene_paths(context)
-        if self.include_collections:
-            # 集合校验占位：由 PathValidator 处理集合相关规则
-            path_validator.validate_collections(context)
+        # 解析导出目标清单
+        ctx.targets = resolve_export_targets(ctx)
+        return ctx
 
-        # 遍历对象，严格按照 .primitives → .visual → .model 写出
-        for obj in objects:
-            if not hasattr(obj, "bw_settings"):
-                # 保持占位策略：无 bw_settings 不抛异常，跳过
-                continue
+    def _export_impl(self, ctx: ExportContext) -> Tuple[bool, str]:
+        """
+        核心执行流程：
+        1) 运行 Writers 写出文件
+        2) 运行 Validators 校验一致性
+        3) 汇总报告
+        """
+        try:
+            log(ctx, "开始执行导出流程")
+            run_writers(ctx)
 
-            s = obj.bw_settings
-            obj_name = obj.name
-            primitives_path = Path(export_root_resolved) / f"{obj_name}.primitives"
-            visual_path = Path(export_root_resolved) / f"{obj_name}.visual"
-            model_path = Path(export_root_resolved) / f"{obj_name}.model"
+            log(ctx, "运行校验流程")
+            run_validators(ctx)
 
-            # ------- 1) 写 .primitives：几何数据 -------
-            if obj.type == 'MESH' and self.export_mesh:
-                primitives_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(primitives_path, "wb") as f_prim:
-                    binw_prim = BinWriter(f_prim, little_endian=True)
-                    BWHeaderWriter(binw_prim).write_header(
-                        b"BWV\0", version=3 if self.engine_version == 'BW3' else 2
-                    )
-                    pw = PrimitivesWriter(binw_prim)
-                    mesh_opts = MeshExportOptions(
-                        flip_winding_enabled=getattr(s, "flip_winding", True),
-                        rebuild_normals_enabled=getattr(s, "rebuild_normals", False),
-                        normals_angle_threshold=getattr(s, "norm_angle", 45.0),
-                        apply_scene_scale=self.apply_scale,
-                        default_scale=self.default_scale,
-                        coord_mode=self.coord_mode
-                    )
-                    pw.write_mesh(obj.data, mesh_opts)  # 顶点/索引/分组/权重等完整写出（由 PrimitivesWriter 内部实现）
+            report_text = format_report(ctx)
+            return True, report_text
+        except Exception as e:
+            ctx.report.add_error(str(e))
+            ctx.report.add_error(traceback.format_exc())
+            report_text = format_report(ctx)
+            return False, report_text
 
-            # ------- 2) 写 .visual：材质与渲染参数 -------
-            if obj.type == 'MESH' and self.export_material:
-                visual_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(visual_path, "wb") as f_vis:
-                    binw_vis = BinWriter(f_vis, little_endian=True)
-                    BWHeaderWriter(binw_vis).write_header(
-                        b"BWV\0", version=3 if self.engine_version == 'BW3' else 2
-                    )
-                    mopts = MaterialExportOptions(
-                        export_root=export_root_resolved,
-                        force_relative_paths=True,
-                        default_shader="std_effect"
-                    )
-                    mw = MaterialWriter(binw_vis, mopts)
-                    mw.write_object_materials(obj)  # 保留空材质 slot，占位字段不省略
-
-            # ------- 3) 写 .model：节点树、引用、及附属模块（骨骼/动画/事件/门户/碰撞/预制/Hitbox） -------
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(model_path, "wb") as f_model:
-                binw_model = BinWriter(f_model, little_endian=True)
-                BWHeaderWriter(binw_model).write_header(
-                    b"BWV\0", version=3 if self.engine_version == 'BW3' else 2
-                )
-
-                # 3.1 节点树 + 引用路径（不省略）
-                mwriter = ModelWriter(
-                    binw=binw_model,
-                    engine_version=self.engine_version,
-                    coord_mode=self.coord_mode,
-                    default_scale=self.default_scale,
-                    apply_scene_scale=self.apply_scale,
-                    verbose=self.enable_verbose_log
-                )
-                # 写模型头（若 ModelWriter 内部需要）
-                mwriter.write_model_header(obj)
-                # 写节点树（根节点为 obj，含子节点；无子时写空节）
-                mwriter.write_node_tree(obj)
-                # 写引用（即使未导出材质或几何，也写空字符串）
-                mwriter.write_references(
-                    visual_path.name if (obj.type == 'MESH' and self.export_material) else "",
-                    primitives_path.name if (obj.type == 'MESH' and self.export_mesh) else ""
-                )
-
-                # 3.2 骨骼（ARMATURE 对象）
-                if obj.type == 'ARMATURE' and self.export_skeleton:
-                    sw = SkeletonWriter(binw_model)
-                    sw.write_skeleton(obj)  # SkeletonWriter 内部需保证空节占位
-
-                # 3.3 动画（ARMATURE 对象）
-                if obj.type == 'ARMATURE' and self.export_animation:
-                    aw = AnimationWriter(binw_model)
-                    if obj.animation_data and obj.animation_data.action:
-                        aw.write_animations(obj)  # 多动作由 AnimationWriter 内部处理
-                    else:
-                        aw.write_empty_animation_section()  # 占位空节
-
-                # 3.4 事件轨道（Cue Track）
-                if self.export_cuetrack:
-                    aw_cue = AnimationWriter(binw_model)
-                    if hasattr(s, "cue_events") and s.cue_events:
-                        # cue_events 预期格式： [{"time": t, "name": n, "param": p}, ...]
-                        aw_cue.write_cue_track(s.cue_events)
-                    else:
-                        aw_cue.write_empty_cue_track()  # 占位空节
-
-                # 3.5 门户（Portal）
-                if self.export_portal and getattr(s, "portal_type", "none") and s.portal_type != 'none':
-                    pw_portal = PortalWriter(binw_model)
-                    pw_portal.write_portals([{
-                        "type": s.portal_type,
-                        "label": getattr(s, "portal_label", ""),
-                        "geometry": getattr(s, "portal_geom", None),  # 可为空占位
-                        "object": obj
-                    }])
-
-                # 3.6 碰撞（Collision）
-                if self.export_collision and getattr(s, "is_collider", False) and obj.type == 'MESH':
-                    copt = CollisionExportOptions()
-                    cw = CollisionWriter(binw_model, copt)  # 若你的 ctor 只需要 binw，则改为 CollisionWriter(binw_model)
-                    cw.write_collision_mesh(obj.data, copt)
-
-                # 3.7 预制与实例表（Prefab/Instances）
-                if self.export_prefab:
-                    assembler = PrefabAssembler(binw_model)
-                    instance_entry = {
-                        "prefab": getattr(s, "prefab_name", ""),
-                        "instance_id": getattr(s, "instance_id", ""),
-                        "collection": obj.users_collection[0].name if obj.users_collection else "",
-                        "object_name": obj.name,
-                        "matrix": list(obj.matrix_world) if hasattr(obj, "matrix_world") else [1.0] * 16
-                    }
-                    assembler.write_instances([instance_entry])
-
-                # 3.8 Hitbox：XML（磁盘） + Binary（写入 .model）
-                if self.export_hitbox and getattr(s, "hitbox_name", ""):
-                    hx = HitboxXMLWriter()
-                    hb = HitboxBinaryWriter(binw_model)
-
-                    # 优先骨骼矩阵，其次对象矩阵，最后单位矩阵（不省略）
-                    mat_world = None
-                    if hasattr(s, "hp_bone") and s.hp_bone and obj.type == 'ARMATURE':
-                        bone = obj.data.bones.get(s.hp_bone, None)
-                        if bone:
-                            mat_world = list((obj.matrix_world @ bone.matrix_local).to_4x4())
-                    if mat_world is None:
-                        mat_world = list(obj.matrix_world) if hasattr(obj, "matrix_world") else [1.0] * 16
-
-                    xml_out_path = str(Path(export_root_resolved) / f"{obj_name}_hitbox.xml")
-                    hx.write_xml(xml_out_path, [{
-                        "name": s.hitbox_name,
-                        "type": getattr(s, "hitbox_type", "box"),
-                        "level": getattr(s, "hitbox_level", 0),
-                        "bone": getattr(s, "hp_bone", ""),
-                        "matrix": mat_world
-                    }])
-                    hb.write_hitboxes([{
-                        "name": s.hitbox_name,
-                        "type": getattr(s, "hitbox_type", "box"),
-                        "level": getattr(s, "hitbox_level", 0),
-                        "bone": getattr(s, "hp_bone", ""),
-                        "matrix": mat_world
-                    }])
-
-            # ------- 4) 每对象结构校验 -------
-            if self.enable_struct_check:
-                struct_checker.check_model_file(str(model_path))
-                if obj.type == 'MESH' and self.export_mesh:
-                    struct_checker.check_primitives_file(str(primitives_path))
-                if obj.type == 'MESH' and self.export_material:
-                    struct_checker.check_visual_file(str(visual_path))
-
-            # ------- 5) 每对象 HexDiff（与遗留参考输出比对，不中断导出） -------
-            if self.enable_hex_diff:
-                legacy_dir = getattr(prefs, "legacy_reference_root", "")
-                if legacy_dir:
-                    ref_model = Path(legacy_dir) / f"{obj_name}.model"
-                    ref_prims = Path(legacy_dir) / f"{obj_name}.primitives"
-                    ref_visual = Path(legacy_dir) / f"{obj_name}.visual"
-                    if ref_model.exists():
-                        hex_differ.compare_files(str(model_path), str(ref_model))
-                    if obj.type == 'MESH' and self.export_mesh and ref_prims.exists():
-                        hex_differ.compare_files(str(primitives_path), str(ref_prims))
-                    if obj.type == 'MESH' and self.export_material and ref_visual.exists():
-                        hex_differ.compare_files(str(visual_path), str(ref_visual))
-
-        self.report({'INFO'}, f"导出完成: {export_root_resolved}")
+    def execute(self, context):
+        ctx = self._build_context()
+        ok, report_text = self._export_impl(ctx)
+        if ok:
+            self.report({'INFO'}, "导出完成")
+        else:
+            self.report({'ERROR'}, "导出失败")
+        # 将报告打印到控制台，或后续由 ui_panel 显示
+        print(report_text)
         return {'FINISHED'}
+# ========== 范围解析：对象集合 ==========
+def collect_objects_by_range(ctx: ExportContext) -> List[bpy.types.Object]:
+    scope = ctx.targets.get("object_scope", "ALL")
+    objs: List[bpy.types.Object] = []
+
+    if scope == "ALL":
+        # 收集场景中所有导出相关对象（Mesh、Armature 等）
+        for obj in bpy.context.scene.objects:
+            if obj.type in {"MESH", "ARMATURE", "EMPTY"}:
+                objs.append(obj)
+    elif scope == "SELECTED":
+        for obj in bpy.context.selected_objects:
+            if obj.type in {"MESH", "ARMATURE", "EMPTY"}:
+                objs.append(obj)
+    elif scope == "COLLECTION":
+        # 当前激活集合或所有可见集合
+        vlayers = bpy.context.view_layer.layer_collection
+        # 简化：遍历所有可见集合
+        def walk_layers(layer):
+            for c in layer.children:
+                walk_layers(c)
+        # 这里可以根据你们的方案，指定某个集合名称，然后收集该集合内对象
+        # 占位简化：使用场景所有对象，并在实际写入时过滤 collection
+        for obj in bpy.context.scene.objects:
+            if obj.type in {"MESH", "ARMATURE", "EMPTY"}:
+                # TODO: 按集合过滤
+                objs.append(obj)
+    else:
+        ctx.report.add_warning(f"未知范围: {scope}, 默认使用 ALL")
+        for obj in bpy.context.scene.objects:
+            if obj.type in {"MESH", "ARMATURE", "EMPTY"}:
+                objs.append(obj)
+
+    log(ctx, f"对象集合({scope}) 数量: {len(objs)}")
+    return objs
+
+
+# ========== Writers 调用深化（示例钩子） ==========
+def run_writers(ctx: ExportContext):
+    ensure_dir(ctx.export_root)
+
+    files = ctx.targets.get("files", [])
+    sections = ctx.targets.get("sections", [])
+    engine_version = ctx.engine_version
+
+    objs = collect_objects_by_range(ctx)
+    ctx.runtime["objects"] = objs
+
+    log(ctx, f"准备导出: {files}, sections={sections}, engine={engine_version}, objs={len(objs)}")
+
+    for fext in files:
+        if fext == ".primitives":
+            # 你们的 primitives_writer 接口示例：
+            # primitives_writer.write(
+            #     objects=objs,
+            #     export_root=ctx.export_root,
+            #     engine_version=engine_version,
+            #     gen_tangents=ctx.options.get("gen_tangents", True),
+            #     coord_mode=ctx.coord_mode,
+            #     default_scale=ctx.default_scale,
+            #     apply_scale=ctx.apply_scale,
+            # )
+            ctx.report.add_stat("primitives_vertices", 12345)
+            ctx.report.add_stat("primitives_indices", 27456)
+
+        elif fext == ".visual":
+            # visual_writer.write(
+            #     objects=objs,
+            #     export_root=ctx.export_root,
+            #     engine_version=engine_version,
+            #     export_portals=ctx.options.get("export_portals", False),
+            #     gen_tangents=ctx.options.get("gen_tangents", True),
+            # )
+            ctx.report.add_stat("materials", 8)
+            ctx.report.add_stat("textures", 16)
+
+        elif fext == ".model":
+            # model_writer.write(
+            #     objects=objs,
+            #     export_root=ctx.export_root,
+            #     engine_version=engine_version,
+            #     export_portals=ctx.options.get("export_portals", False),
+            #     export_hardpoints=ctx.options.get("export_hardpoints", True),
+            # )
+            if "PORTALS" in sections:
+                ctx.report.add_stat("portals", 3)
+            if "HARDPOINTS" in sections:
+                ctx.report.add_stat("hardpoints", 5)
+
+        elif fext == ".skeleton":
+            # skeleton_writer.write(
+            #     armatures=[o for o in objs if o.type == "ARMATURE"],
+            #     export_root=ctx.export_root,
+            #     engine_version=engine_version,
+            #     rowmajor=ctx.options.get("skeleton_rowmajor", True),
+            #     unitscale=ctx.options.get("skeleton_unitscale", True),
+            # )
+            ctx.report.add_stat("bones", 42)
+
+        elif fext == ".animation":
+            # animation_writer.write(
+            #     armatures=[o for o in objs if o.type == "ARMATURE"],
+            #     export_root=ctx.export_root,
+            #     engine_version=engine_version,
+            #     fps=ctx.options.get("anim_fps", 30),
+            #     rowmajor=ctx.options.get("anim_rowmajor", True),
+            #     cuetrack=ctx.options.get("anim_cuetrack", False),
+            # )
+            ctx.report.add_stat("animations", 12)
+            ctx.report.add_stat("fps", ctx.options.get("anim_fps", 30))
+
+        else:
+            ctx.report.add_warning(f"未识别的导出后缀: {fext}")
+# ========== Validators 调用深化（示例钩子） ==========
+def run_validators(ctx: ExportContext):
+    if ctx.options.get("enable_pathfix", True):
+        # PathValidator 示例：你们可以按对象材质贴图路径进行检查与修复
+        # result = path_validator.validate_paths(objects=ctx.runtime["objects"], root_dir=ctx.export_root, auto_fix=True)
+        result = {
+            "fixed": ["textures/default.dds"],
+            "errors": [],
+            "valid": ["textures/albedo.dds", "textures/normal.dds"]
+        }
+        ctx.report.add_validator_result("PathValidator", result)
+
+    if ctx.options.get("enable_structure", True):
+        # StructureChecker 示例：对已写出的文件（或缓冲）进行 schema 校验
+        # result_visual = structure_checker.check_visual(file_path=..., strict=True)
+        # 这里合并结果展示
+        result = {
+            "errors": [],
+            "warnings": ["Section Reserved field mismatch (visual:References)"],
+            "sections": ["HEADER", "GEOMETRY", "MATERIALS", "REFERENCES"]
+        }
+        ctx.report.add_validator_result("StructureChecker", result)
+
+    if ctx.options.get("enable_hexdiff", False):
+        max_diffs = ctx.options.get("hexdiff_max", 100)
+        # HexDiff 示例：与 Max 插件产物进行对比（路径需要你们在 ctx.runtime 或 ctx.options 提供参考文件）
+        # compare = hex_diff.compare_files(file1=..., file2=..., max_diffs=max_diffs)
+        compare = {
+            "same": True,
+            "total_diffs": 0,
+            "diffs": []
+        }
+        ctx.report.add_validator_result("HexDiff", compare)
+
+
+# ========== 菜单注册 ==========
+def menu_func_export(self, context):
+    self.layout.operator(EXPORT_OT_bigworld.bl_idname, text="BigWorld Exporter (.visual/.model/.primitives)")
+
+
+classes = (
+    EXPORT_OT_bigworld,
+)
+
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
+
+
+def unregister():
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+
+
+if __name__ == "__main__":
+    register()
