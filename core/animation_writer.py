@@ -22,7 +22,7 @@ from .binsection_writer import BinSectionWriter, BinaryWriter
 from .utils import (
     # If axis/unit mapping is needed for per-channel data, add functions here and call them.
     # E.g., axis_map_y_up_to_z_up_vec3, axis_map_y_up_to_z_up_quat
-)
+    )
 from .utils import ExportAxis, ExportUnits
 
 

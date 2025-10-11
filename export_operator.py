@@ -225,51 +225,51 @@ class EXPORT_OT_bigworld(bpy.types.Operator, ExportHelper):
     description="以行主序导出骨骼矩阵（与旧版 Max 插件对齐）",
     default=True
 )
-skeleton_unitscale: BoolProperty(
+    skeleton_unitscale: BoolProperty(
     name="Skeleton 应用单位缩放",
     description="将偏好设置或操作符中的单位缩放应用到骨骼",
     default=True
 )
 
-anim_fps: IntProperty(
+    anim_fps: IntProperty(
     name="Animation FPS",
     description="动画导出帧率",
     default=30, min=1, max=240
 )
-anim_rowmajor: BoolProperty(
+    anim_rowmajor: BoolProperty(
     name="Animation 行主序矩阵",
     description="以行主序导出动画矩阵（与骨骼行主序一致）",
     default=True
 )
-anim_cuetrack: BoolProperty(
+    anim_cuetrack: BoolProperty(
     name="启用 CueTrack 导出",
     description="导出动画 CueTrack",
     default=False
 )
 
-collision_bake: BoolProperty(
+    collision_bake: BoolProperty(
     name="Collision 烘焙世界矩阵",
     description="将对象世界变换烘焙到碰撞数据",
     default=True
 )
-collision_flip: BoolProperty(
+    collision_flip: BoolProperty(
     name="Collision 翻转三角缠绕",
     description="在导出碰撞数据时翻转三角形缠绕方向",
     default=False
 )
-collision_index: EnumProperty(
+    collision_index: EnumProperty(
     name="索引类型",
     description="碰撞/网格索引类型（与引擎兼容）",
     items=[('U16', "u16", ""), ('U32', "u32", "")],
     default='U16'
 )
 
-prefab_rowmajor: BoolProperty(
+    prefab_rowmajor: BoolProperty(
     name="Prefab 行主序矩阵",
     description="以行主序导出 Prefab 的相关矩阵",
     default=True
 )
-prefab_visibility: BoolProperty(
+    prefab_visibility: BoolProperty(
     name="Prefab 写入可见性标志",
     description="在 Prefab 中写入可见性标志位",
     default=True
