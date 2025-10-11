@@ -1,56 +1,39 @@
-# 相对路径: __init__.py
-# 功能: 插件入口，负责:
-#   - 注册/注销所有模块 (UI、导出器、Preferences)
-#   - 集成到 Blender 菜单 (File > Export)
-#   - 确保 BigWorldObjectSettings 正确挂载到 Object
-
+# -*- coding: utf-8 -*-
 bl_info = {
     "name": "BigWorld Exporter",
-    "author": "Rick + Copilot",
+    "author": "Your Team",
     "version": (1, 0, 0),
-    "blender": (4, 0, 0),
-    "location": "File > Export > BigWorld 资源",
-    "description": "导出 BigWorld 引擎兼容的模型/材质/骨骼/动画/碰撞/门户/预制/Hitbox",
+    "blender": (4, 5, 3),
+    "location": "File > Export > BigWorld Exporter",
+    "description": "Export BigWorld assets (.visual, .model, .primitives, .skeleton, .animation) "
+                   "with validators and advanced options, aligned with legacy 3ds Max plugin.",
     "category": "Import-Export",
 }
 
 import bpy
 
 # 导入子模块
-from .preferences import BigWorldAddonPreferences
-from .ui_panel import BIGWORLD_PT_sidebar, BigWorldObjectSettings
-from .export_operator import EXPORT_OT_bigworld
+from . import preferences
+from . import ui_panel          # N 面板（3D 视图侧边栏）
+from . import ui_panel_export   # 导出对话框右侧面板
+from . import export_operator   # 核心导出操作符
 
-
-# 菜单集成
-def menu_func_export(self, context):
-    self.layout.operator(EXPORT_OT_bigworld.bl_idname, text="BigWorld 资源 (.model)")
-
-
-# 注册类
-classes = (
-    BigWorldAddonPreferences,
-    BigWorldObjectSettings,   # 必须先注册 PropertyGroup
-    BIGWORLD_PT_sidebar,
-    EXPORT_OT_bigworld,
+# 如果未来有更多模块（如 ui_panel_n.py），也可以在这里统一导入
+modules = (
+    preferences,
+    ui_panel,
+    ui_panel_export,
+    export_operator,
 )
 
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
-    # 挂载到 Object
-    bpy.types.Object.bw_settings = bpy.props.PointerProperty(type=BigWorldObjectSettings)
-    bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
+    for m in modules:
+        if hasattr(m, "register"):
+            m.register()
 
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
-    # 删除属性
-    del bpy.types.Object.bw_settings
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-
-
-if __name__ == "__main__":
-    register()
+    for m in reversed(modules):
+        if hasattr(m, "unregister"):
+            m.unregister()
