@@ -22,34 +22,87 @@
 ---
 
 ## 2. 插件目录结构
+好的，我们进入 **第二章：系统架构概览**。这一章的目标是把仓库中的代码结构、模块职责和整体调用链路梳理清楚，让团队成员一眼就能理解插件的全貌。  
 
+---
+
+## 第二章：系统架构概览
+
+### 2.1 代码目录结构（仓库现状）
 ```
 blender_bigworld_exporter/
-├── __init__.py                # 插件入口，注册/注销
-├── preferences.py              # 插件全局设置（Addon Preferences）
-├── ui_panel.py                 # N 面板 UI（对象级参数）
-├── export_operator.py          # 导出入口（File > Export）
 │
-├── core/                       # 核心 Writer 模块
-│   ├── binsection_writer.py
-│   ├── primitives_writer.py
-│   ├── material_writer.py
-│   ├── skeleton_writer.py
-│   ├── animation_writer.py
-│   ├── collision_writer.py
-│   ├── portal_writer.py
-│   ├── prefab_assembler.py
-│   ├── hitbox_xml_writer.py
-│   └── utils.py
+├── core/                  # 核心逻辑（导出、文件处理、工具函数）
+│   ├── exporter.py
+│   ├── writer.py
+│   └── ...
 │
-├── validators/                 # 校验工具
+├── validators/            # 校验器集合
+│   ├── path_validator.py
 │   ├── structure_checker.py
 │   ├── hex_diff.py
-│   └── path_validator.py
+│   └── ...
 │
-└── docs/
-    └── schema_reference.md     # 导出文件权威规范
+├── ui/                    # Blender UI 面板与交互
+│   ├── ui_panel.py
+│   ├── preferences.py
+│   └── ...
+│
+├── operators/             # Blender Operator（导出入口）
+│   └── export_operator.py
+│
+├── schemas/               # Schema 定义（结构、参数、规则）
+│
+├── tests/                 # 单元测试与集成测试
+│
+└── __init__.py            # 插件入口
 ```
+
+---
+
+### 2.2 模块划分与职责
+| 模块 | 职责 | 关键文件 |
+|------|------|----------|
+| **UI 层** | 提供 Blender 面板、参数输入、用户交互 | `ui_panel.py`, `preferences.py` |
+| **Operator 层** | 作为 Blender Operator，调度导出流程 | `export_operator.py` |
+| **Core 层** | 实现导出逻辑、文件写入、工具函数 | `exporter.py`, `writer.py` |
+| **Validators 层** | 校验导出结果，保证与 Max 插件一致 | `path_validator.py`, `structure_checker.py`, `hex_diff.py` |
+| **Schemas 层** | 定义数据结构、文件格式规则 | `schemas/` |
+| **Tests 层** | 自动化测试，覆盖 Writer 与 Validator | `tests/` |
+
+---
+
+### 2.3 调用链路
+```
+[用户在 Blender UI 输入参数]
+          ↓
+[Export Operator 调度]
+          ↓
+[Core Writer 导出文件]
+          ↓
+[Validators 校验导出结果]
+          ↓
+[生成导出文件 + 校验报告]
+```
+
+---
+
+### 2.4 与 BigWorld 引擎的关系
+- **输入**：Blender 中的 3D 资产（模型、材质、动画等）  
+- **输出**：符合 BigWorld 引擎要求的二进制文件（与 Max 插件产物对齐）  
+- **接口**：通过 Writer 和 Validator 保证导出文件的结构、路径、二进制内容完全一致  
+
+---
+
+### 2.5 改进点
+- **目录清晰度**：目前 `core/` 与 `operators/` 的边界略模糊，建议明确：  
+  - `operators/` 仅负责 Blender Operator 封装  
+  - `core/` 专注于导出逻辑与工具函数  
+- **Schemas 使用**：部分校验逻辑硬编码在 Validator 中，建议迁移到 `schemas/`，实现 **Schema 驱动校验**。  
+- **日志与错误码**：需要在 Operator → Core → Validator 全链路打通，保证错误可追溯。  
+
+---
+
 
 ---
 

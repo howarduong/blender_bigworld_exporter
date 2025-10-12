@@ -131,3 +131,19 @@ class StructureChecker:
 
     def check_primitives_file(self, filepath: str) -> Dict:
         return self._check_file(filepath, self.primitives_schema, self.primitives_expected_order)
+    # --- 兼容 primitives_writer.py 的导入 ---
+    # 如果 primitives_writer.py 需要 validate_* 系列函数，
+    # 而本文件里实际函数名是 check_*，就在这里做别名映射。
+
+    from . import structure_checker as sc
+    def validate_vertex_count(*args, **kwargs):
+       from . import structure_checker as sc
+       return sc.check_vertex_count(*args, **kwargs)
+
+    def validate_index_count(*args, **kwargs):
+       from . import structure_checker as sc
+       return sc.check_index_count(*args, **kwargs)
+
+    def validate_material_groups(*args, **kwargs):
+       from . import structure_checker as sc
+       return sc.check_material_groups(*args, **kwargs)
