@@ -1,10 +1,16 @@
-# 相对路径: blender_bigworld_exporter/validators/structure_checker.py
-# 功能: 严格对齐 Max 插件的结构校验器
-# 支持 .model / .visual / .primitives 三类文件
+# -*- coding: utf-8 -*-
+"""
+BigWorld Blender Exporter - Structure Checker
+严格对齐 Max 插件的结构与几何校验器
+- 二进制结构校验（.model / .visual / .primitives）
+- PrimitivesWriter 所需的几何后置校验（validate_*）
+"""
 
+from typing import Dict, List
 import struct
 import os
-from typing import Dict, List
+
+# ========== 二进制结构校验（文件级） ==========
 
 class StructureChecker:
     def __init__(self, verbose: bool = False):
@@ -131,19 +137,90 @@ class StructureChecker:
 
     def check_primitives_file(self, filepath: str) -> Dict:
         return self._check_file(filepath, self.primitives_schema, self.primitives_expected_order)
-    # --- 兼容 primitives_writer.py 的导入 ---
-    # 如果 primitives_writer.py 需要 validate_* 系列函数，
-    # 而本文件里实际函数名是 check_*，就在这里做别名映射。
 
-    from . import structure_checker as sc
-    def validate_vertex_count(*args, **kwargs):
-       from . import structure_checker as sc
-       return sc.check_vertex_count(*args, **kwargs)
 
-    def validate_index_count(*args, **kwargs):
-       from . import structure_checker as sc
-       return sc.check_index_count(*args, **kwargs)
+# ========== PrimitivesWriter 几何后置校验（函数式导出） ==========
 
-    def validate_material_groups(*args, **kwargs):
-       from . import structure_checker as sc
-       return sc.check_material_groups(*args, **kwargs)
+def validate_vertex_count(mesh, expected_count: int = None) -> bool:
+    if mesh is None or not hasattr(mesh, "vertices"):
+        raise ValueError("无效的 mesh 对象（缺少 vertices）")
+    actual = len(mesh.vertices)
+    if expected_count is not None and actual != expected_count:
+        raise ValueError(f"顶点数量不匹配: 期望 {expected_count}, 实际 {actual}")
+    if actual == 0:
+        raise ValueError("顶点数量为 0")
+    return True
+
+
+def validate_index_count(mesh, expected_count: int = None) -> bool:
+    if mesh is None or not hasattr(mesh, "polygons"):
+        raise ValueError("无效的 mesh 对象（缺少 polygons）")
+    actual = sum(len(p.vertices) for p in mesh.polygons)
+    if expected_count is not None and actual != expected_count:
+        raise ValueError(f"索引数量不匹配: 期望 {expected_count}, 实际 {actual}")
+    return True
+
+
+def validate_material_groups(obj, required_slots: int = None) -> bool:
+    if obj is None or not hasattr(obj.data, "materials"):
+        raise ValueError("对象没有材质槽")
+    actual = len(obj.data.materials)
+    if required_slots is not None and actual < required_slots:
+        raise ValueError(f"材质槽数量不足: 期望至少 {required_slots}, 实际 {actual}")
+    return True
+
+
+def validate_vertex_streams(streams) -> bool:
+    count = streams.count()
+    if count == 0:
+        raise ValueError("VertexStreams 为空")
+    if len(streams.positions) != count:
+        raise ValueError("positions 数量与顶点数不一致")
+    if len(streams.normals) not in (0, count):
+        raise ValueError("normals 数量与顶点数不一致")
+    if len(streams.tangents) not in (0, count):
+        raise ValueError("tangents 数量与顶点数不一致")
+    if len(streams.uv0) not in (0, count):
+        raise ValueError("uv0 数量与顶点数不一致")
+    if len(streams.uv1) not in (0, count):
+        raise ValueError("uv1 数量与顶点数不一致")
+    if len(streams.colors) not in (0, count):
+        raise ValueError("colors 数量与顶点数不一致")
+    # 若使用 skin（非默认全重 1.0 到槽 0）则须对齐数量
+    if any(w != (1.0, 0.0, 0.0, 0.0) for w in streams.bone_weights):
+        if len(streams.bone_indices) != count or len(streams.bone_weights) != count:
+            raise ValueError("skin 顶点数据数量与顶点数不一致")
+    return True
+
+
+def validate_primitives_topology(streams, indices) -> bool:
+    if len(indices) % 3 != 0:
+        raise ValueError("索引数量不是 3 的倍数，拓扑错误")
+    vcount = streams.count()
+    if vcount == 0 and len(indices) > 0:
+        raise ValueError("存在索引但顶点数为 0")
+    if len(indices) > 0:
+        if min(indices) < 0:
+            raise ValueError("索引存在负值")
+        if max(indices) >= vcount:
+            raise ValueError("索引引用超出顶点范围")
+    return True
+
+
+def validate_primitives_groups(indices, groups, vertex_count: int) -> bool:
+    total_indices = len(indices)
+    group_sum = sum(g.num_primitives * 3 for g in groups)
+    if group_sum != total_indices:
+        raise ValueError(f"PrimitiveGroup 索引数量不匹配: 组内 {group_sum}, 实际 {total_indices}")
+    for g in groups:
+        if g.start_vertex < 0:
+            raise ValueError("PrimitiveGroup start_vertex 为负数")
+        if g.num_vertices < 0:
+            raise ValueError("PrimitiveGroup num_vertices 为负数")
+        if g.start_vertex + g.num_vertices > vertex_count:
+            raise ValueError("PrimitiveGroup 顶点范围越界")
+        if g.num_primitives < 0:
+            raise ValueError("PrimitiveGroup num_primitives 为负数")
+        if g.start_index < 0:
+            raise ValueError("PrimitiveGroup start_index 为负数")
+    return True
