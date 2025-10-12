@@ -22,7 +22,7 @@ from .utils import (
     ensure_posix_lower_relative_path,
 )
 from .utils import ExportAxis, ExportUnits
-from .validators.path_validator import validate_output_path
+from ..validators.path_validator import validate_output_path
 
 
 # ====== Specification constants (logical keys mapped by BinSectionWriter) ======
@@ -327,3 +327,4 @@ def export_model(
 ) -> None:
     writer = ModelWriter(ctx, opts)
     writer.write_model(root_obj, output_path, references)
+
