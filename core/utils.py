@@ -287,9 +287,33 @@ def set_obj_prop(obj, key: str, value):
 
 def axis_map_y_up_to_z_up_quat(quat4: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
     """
-    Quaternion mapping placeholder; if needed, implement proper basis change for rotations.
-    For now, pass-through to keep alignment without introducing errors.
+    Quaternion mapping: Blender Y-Up -> BigWorld Z-Up.
+    Implemented via quaternion conjugation with a = Rot(+90° around X),
+    which performs the same basis change as matrix M' = A * M * A^{-1}.
+    Input/Output order: (x, y, z, w).
     """
-    # Note: Proper quaternion basis change would require composing with A/B rotation.
-    # Kept as pass-through until legacy spec requires exact behavior.
-    return quat4
+    # Helper operations for (x, y, z, w) quaternions
+    def quat_mul(q1: Tuple[float, float, float, float],
+                 q2: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+        x1, y1, z1, w1 = q1
+        x2, y2, z2, w2 = q2
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        return (x, y, z, w)
+
+    def quat_conjugate(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+        x, y, z, w = q
+        return (-x, -y, -z, w)
+
+    # a = rotation of +90 degrees around X axis
+    half = math.pi * 0.5 * 0.5  # theta/2 with theta = +90°
+    sin_h = math.sin(half)
+    cos_h = math.cos(half)
+    a = (sin_h, 0.0, 0.0, cos_h)       # (x, y, z, w)
+    a_inv = quat_conjugate(a)          # unit quaternion inverse equals conjugate
+
+    # Conjugation: q' = a ⊗ q ⊗ a^{-1}
+    q = quat4
+    return quat_mul(quat_mul(a, q), a_inv)
