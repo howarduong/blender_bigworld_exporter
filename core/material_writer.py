@@ -19,7 +19,7 @@ import bpy
 
 from .binsection_writer import BinSectionWriter, BinaryWriter
 from .utils import ensure_posix_lower_relative_path
-from .validators.path_validator import validate_output_path
+from ..validators.path_validator import validate_output_path
 
 
 # ====== Specification constants (logical keys mapped by BinSectionWriter) ======
@@ -324,3 +324,4 @@ def export_visual_for_object(
     """
     writer = MaterialWriter(ctx, opts)
     writer.write_visual(obj, output_path, primitives_path, expected_group_count)
+
