@@ -20,9 +20,13 @@ import mathutils
 
 from .binsection_writer import BinSectionWriter, BinaryWriter
 from .utils import (
-    # If axis/unit mapping is needed for per-channel data, add functions here and call them.
-    # E.g., axis_map_y_up_to_z_up_vec3, axis_map_y_up_to_z_up_quat
-    )
+    axis_map_y_up_to_z_up_vec3,
+    axis_map_y_up_to_z_up_quat,
+    axis_map_y_up_to_z_up_tangent,
+    ExportAxis,
+    ExportUnits,
+)
+
 from .utils import ExportAxis, ExportUnits
 
 
@@ -221,11 +225,12 @@ class AnimationWriter:
                 scale = pose_bone.scale.copy()
 
                 # Optional axis/unit mapping for channels
-                if self.opts.map_axis:
-                    # If required, enable channel-specific conversions (add in utils if not present)
-                    # loc = axis_map_y_up_to_z_up_vec3(loc)
-                    # rot = axis_map_y_up_to_z_up_quat(rot)
-                    pass
+                if self.opts.map_axis and self.ctx.axis == ExportAxis.Y_UP_TO_Z_UP:
+                    loc = axis_map_y_up_to_z_up_vec3((loc.x, loc.y, loc.z))
+                    rot_tuple = (rot.x, rot.y, rot.z, rot.w)
+                    rot_mapped = axis_map_y_up_to_z_up_quat(rot_tuple)
+                    rot = mathutils.Quaternion((rot_mapped[3], rot_mapped[0], rot_mapped[1], rot_mapped[2]))
+
 
                 if self.opts.apply_scene_unit_scale and self.ctx.units == ExportUnits.METERS:
                     s = self.ctx.unit_scale
