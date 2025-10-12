@@ -25,7 +25,7 @@ from .utils import (
     # axis_map_y_up_to_z_up_vec3,
 )
 from .utils import ExportAxis, ExportUnits
-from .validators.path_validator import validate_output_path
+from ..validators.path_validator import validate_output_path
 
 
 # ====== Specification constants (logical keys mapped by BinSectionWriter) ======
@@ -323,3 +323,4 @@ def export_collision(
 ) -> None:
     writer = CollisionWriter(ctx, opts)
     writer.write_collision(obj, output_path, group_by_material)
+
