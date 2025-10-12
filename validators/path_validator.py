@@ -89,3 +89,27 @@ class PathValidator:
             return self.default_path
         else:
             return None
+   # ====== 独立函数接口，供 Writer 调用 ======
+
+def validate_output_path(path: str, required_ext: str = None) -> bool:
+    """
+    校验导出文件路径是否合法：
+    - 父目录存在且可写
+    - 扩展名符合要求（如果指定）
+    """
+    import os
+    if not path or not isinstance(path, str):
+        raise ValueError("输出路径无效：必须是字符串")
+
+    parent = os.path.dirname(path)
+    if not parent or not os.path.exists(parent):
+        raise ValueError(f"输出目录不存在: {parent}")
+
+    if not os.access(parent, os.W_OK):
+        raise PermissionError(f"输出目录不可写: {parent}")
+
+    if required_ext and not path.lower().endswith(required_ext.lower()):
+        raise ValueError(f"输出文件扩展名必须为 {required_ext}")
+
+    return True
+
