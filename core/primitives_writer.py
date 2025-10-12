@@ -35,7 +35,7 @@ from ..validators.structure_checker import (
     validate_material_groups,
 )
 
-from .validators.path_validator import validate_output_path
+from ..validators.path_validator import validate_output_path
 
 
 # ====== Specification constants (placeholders mapped to legacy Max plugin spec) ======
@@ -703,3 +703,4 @@ def export_primitives_for_object(
     """
     writer = PrimitivesWriter(ctx, opts)
     writer.write_object(obj, output_path)
+
