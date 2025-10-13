@@ -1,4 +1,9 @@
 # -*- coding: utf-8 -*-
+# 相对路径: core/utils.py
+# 功能: 提供通用工具函数，保持与 3ds Max 插件功能对齐
+# 注意: 本文件集中实现 AxisMap 工具函数 (vec3, quat, matrix)，
+#       所有 Writer (Mesh, Skeleton, Animation, Collision) 必须调用这里的函数。
+
 """
 BigWorld Blender Exporter - Utils (strictly aligned, centralized)
 
@@ -317,3 +322,29 @@ def axis_map_y_up_to_z_up_quat(quat4: Tuple[float, float, float, float]) -> Tupl
     # Conjugation: q' = a ⊗ q ⊗ a^{-1}
     q = quat4
     return quat_mul(quat_mul(a, q), a_inv)
+
+
+# =========================
+# Module exports
+# =========================
+
+__all__ = [
+    "ExportAxis",
+    "ExportUnits",
+    "axis_map_y_up_to_z_up_vec3",
+    "axis_map_y_up_to_z_up_vec4",
+    "axis_map_y_up_to_z_up_tangent",
+    "axis_map_y_up_to_z_up_matrix_row_major",
+    "axis_map_y_up_to_z_up_matrix",
+    "axis_map_y_up_to_z_up_quat",
+    "to_row_major_tuple_4x4",
+    "apply_unit_scale_vec3",
+    "scene_unit_to_meters",
+    "ensure_posix_lower_relative_path",
+    "make_relative_path",
+    "flip_winding",
+    "rebuild_normals",
+    "rebuild_tangents",
+    "get_obj_prop",
+    "set_obj_prop",
+]

@@ -27,7 +27,7 @@ from .utils import (
     ExportUnits,
 )
 
-from .utils import ExportAxis, ExportUnits
+
 
 
 # ====== Specification constants (logical keys mapped by BinSectionWriter) ======
@@ -225,12 +225,15 @@ class AnimationWriter:
                 scale = pose_bone.scale.copy()
 
                 # Optional axis/unit mapping for channels
+                # Optional axis/unit mapping for channels
                 if self.opts.map_axis and self.ctx.axis == ExportAxis.Y_UP_TO_Z_UP:
+                    # Location
                     loc = axis_map_y_up_to_z_up_vec3((loc.x, loc.y, loc.z))
+                    # Rotation: utils returns (x, y, z, w), need to rebuild Blender Quaternion(w, x, y, z)
                     rot_tuple = (rot.x, rot.y, rot.z, rot.w)
                     rot_mapped = axis_map_y_up_to_z_up_quat(rot_tuple)
                     rot = mathutils.Quaternion((rot_mapped[3], rot_mapped[0], rot_mapped[1], rot_mapped[2]))
-
+          
 
                 if self.opts.apply_scene_unit_scale and self.ctx.units == ExportUnits.METERS:
                     s = self.ctx.unit_scale

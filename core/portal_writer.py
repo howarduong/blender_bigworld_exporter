@@ -13,15 +13,15 @@ from typing import List, Dict
 import bpy
 from mathutils import Vector
 
-from .binsection_writer import BinWriter, SectionWriter
+from .binsection_writer import BinaryWriter, BinSectionWriter
 
 
 class PortalWriter:
     """门户导出器"""
 
-    def __init__(self, binw: BinWriter):
+    def __init__(self, binw: BinaryWriter):
         self.binw = binw
-        self.secw = SectionWriter(binw)
+        self.secw = BinSectionWriter(binw)
 
     # =========================
     # 主入口
