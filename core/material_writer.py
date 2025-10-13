@@ -324,4 +324,3 @@ def export_visual_for_object(
     """
     writer = MaterialWriter(ctx, opts)
     writer.write_visual(obj, output_path, primitives_path, expected_group_count)
-

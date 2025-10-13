@@ -327,4 +327,3 @@ def export_model(
 ) -> None:
     writer = ModelWriter(ctx, opts)
     writer.write_model(root_obj, output_path, references)
-

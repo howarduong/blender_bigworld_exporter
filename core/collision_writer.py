@@ -323,4 +323,3 @@ def export_collision(
 ) -> None:
     writer = CollisionWriter(ctx, opts)
     writer.write_collision(obj, output_path, group_by_material)
-

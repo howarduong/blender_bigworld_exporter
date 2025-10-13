@@ -13,7 +13,7 @@ from bpy.props import (
 from bpy_extras.io_utils import ExportHelper
 
 # 引入 core 与 validators
-from .core import primitives_writer, visual_writer, model_writer, skeleton_writer, animation_writer
+from .core import primitives_writer, material_writer, model_writer, skeleton_writer, animation_writer
 from .validators import path_validator, structure_checker, hex_diff
 
 
@@ -100,12 +100,15 @@ def run_writers(ctx: ExportContext):
 
     if ctx.export_type == "STATIC":
         primitives_writer.write(ctx, objs)
-        visual_writer.write(ctx, objs)
+        # Visual = Geometry + Material
+        model_writer.write(ctx, objs)
+        material_writer.write(ctx, objs)
 
     elif ctx.export_type == "SKINNED":
         primitives_writer.write(ctx, objs)
-        visual_writer.write(ctx, objs)
+        # Visual = Geometry + Material
         model_writer.write(ctx, objs)
+        material_writer.write(ctx, objs)
         skeleton_writer.write(ctx, objs)
 
     elif ctx.export_type == "ANIM":

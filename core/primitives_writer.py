@@ -703,4 +703,3 @@ def export_primitives_for_object(
     """
     writer = PrimitivesWriter(ctx, opts)
     writer.write_object(obj, output_path)
-

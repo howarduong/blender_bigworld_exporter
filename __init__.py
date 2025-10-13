@@ -18,7 +18,7 @@ from . import ui_panel          # N 面板（3D 视图侧边栏）
 from . import ui_panel_export   # 导出对话框右侧面板
 from . import export_operator   # 核心导出操作符
 
-# 如果未来有更多模块（如 ui_panel_n.py），也可以在这里统一导入
+# 如果未来有更多模块（如 ui_panel.py），也可以在这里统一导入
 modules = (
     preferences,
     ui_panel,
