@@ -136,6 +136,12 @@ class BigWorldObjectSettingsV2(PropertyGroup):
         name="材质槽映射",
         description="Blender 材质槽 → BigWorld 材质映射列表"
     )
+    bw_material_slot_map_index: IntProperty(
+        name="Material Slot Map Index",
+        description="材质槽映射列表 UI 索引",
+        default=0,
+        min=0
+    )
     bw_shader_tag: EnumProperty(
         name="Shader 标签",
         description="材质管线标签（与 Max 插件对齐）",
@@ -189,7 +195,6 @@ class BigWorldObjectSettingsV2(PropertyGroup):
         description="启用群体三角碰撞支持（大型场景优化）",
         default=False
     )
-
     # —— Hitbox 与硬点（Max: hitboxName, hitboxType, hitboxLevel, hardpointName, hardpointType, bindBone）——
     bw_hitbox_name: StringProperty(
         name="Hitbox 名称",
@@ -293,8 +298,12 @@ class BigWorldObjectSettingsV2(PropertyGroup):
         name="动画事件列表",
         description="结构化的 CueTrack 事件项集合"
     )
-
-
+    bw_animation_events_index: IntProperty(
+        name="Animation Events Index",
+        description="动画事件列表 UI 索引",
+        default=0,
+        min=0
+    )
 class BW_PT_ObjectExportV2(Panel):
     bl_label = "BigWorld 对象导出参数"
     bl_idname = "BW_PT_ObjectExportV2"
@@ -396,8 +405,7 @@ class BW_PT_ObjectExportV2(Panel):
         box_val.label(text="对象校验")
         col_val = box_val.column(align=True)
         col_val.label(text="请在导出前运行结构校验与路径校验（由导出对话框控制）。")
-
-
+# ========== 注册类集合 ==========
 classes = (
     BigWorldMaterialSlotItem,
     BigWorldAnimationEventItem,
@@ -409,26 +417,12 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    # 绑定到 Object
     bpy.types.Object.bw_settings_v2 = bpy.props.PointerProperty(type=BigWorldObjectSettingsV2)
-    # 用于 UI 列表索引存储（材质槽映射、动画事件列表）
-    bpy.types.Object.bw_material_slot_map_index = IntProperty(
-        name="Material Slot Map Index",
-        description="材质槽映射列表 UI 索引",
-        default=0,
-        min=0
-    )
-    bpy.types.Object.bw_animation_events_index = IntProperty(
-        name="Animation Events Index",
-        description="动画事件列表 UI 索引",
-        default=0,
-        min=0
-    )
 
 
 def unregister():
     # 注销顺序反向
-    del bpy.types.Object.bw_animation_events_index
-    del bpy.types.Object.bw_material_slot_map_index
     del bpy.types.Object.bw_settings_v2
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

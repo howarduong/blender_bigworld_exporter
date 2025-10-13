@@ -585,3 +585,9 @@ def register():
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+
+def menu_func_export(self, context):
+    self.layout.operator(
+        BW_OT_Export.bl_idname,
+        text="BigWorld Export (.visual/.primitives/.skeleton/.animation)"
+    )
