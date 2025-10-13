@@ -1,115 +1,122 @@
-# -*- coding: utf-8 -*-
-# preferences.py — BigWorld Exporter 插件偏好设置（完整不省略）
+# File: ./preferences.py
+# Relative path: blender_bigworld_exporter/preferences.py
+# 功能描述:
+# 本文件严格对齐《BigWorld Blender Exporter 最终定版方案》的“插件偏好设置”板块，实现 AddonPreferences。
+# 该面板用于定义项目级默认行为（项目路径、默认导出路径、坐标模式、默认缩放、日志等级、默认校验开关），为导出会话提供初始值。
+# 字段命名、类型、默认值与 Max 插件字段保持一一映射关系。偏好设置不直接执行导出，仅为 ui_panel_export.py 的会话级参数提供默认源。
+# 关联依赖与核心：
+# - 导出入口: export_operator.py 在执行时优先读取 Scene.bw_export_v2，若为空或未设置，回退到 AddonPreferences 的默认值。
+# - 核心工具: core/utils.py 的坐标转换与缩放策略参考此偏好设置，确保与 Max 插件对齐。
+# - 验证工具: validators/* 的默认开关状态参考此偏好设置（严格结构校验、Hex Diff、路径修复、保存报告）。
+
 import bpy
+from bpy.types import AddonPreferences
 from bpy.props import (
     BoolProperty,
     EnumProperty,
     FloatProperty,
-    IntProperty,
-    StringProperty,
+    StringProperty
 )
 
-ADDON_PACKAGE_NAME = __package__ if __package__ else "blender_bigworld_exporter"
 
+class BigWorldAddonPreferences(AddonPreferences):
+    bl_idname = __package__ if __package__ else "blender_bigworld_exporter"
 
-class BigWorldAddonPreferences(bpy.types.AddonPreferences):
-    bl_idname = ADDON_PACKAGE_NAME
-
-    # 全局默认参数（导出根目录、引擎版本、默认缩放、坐标系模式）
-    export_root: StringProperty(
-        name="导出根目录",
-        description="导出文件根目录，支持 // 相对当前 .blend 的路径",
-        default="//BigWorldExport"
+    # —— 项目路径与默认导出路径（与会话级字段对应）——
+    project_root: StringProperty(
+        name="项目根目录",
+        description="项目根目录（用于相对路径解析与资源定位）",
+        subtype='DIR_PATH',
+        default=""
+    )
+    default_export_path: StringProperty(
+        name="默认导出目录",
+        description="默认导出路径（会话级未设置时使用）",
+        subtype='DIR_PATH',
+        default=""
     )
 
-    engine_version: EnumProperty(
-        name="引擎版本",
-        description="BigWorld 引擎版本（影响导出格式与兼容性）",
+    # —— 坐标与缩放（与 Max 插件对齐）——
+    coordinate_system: EnumProperty(
+        name="坐标模式",
+        description="默认坐标模式（与 Max 兼容 / Blender 原生）",
         items=[
-            ('V2', "2.x", "BigWorld 2.x"),
-            ('V3', "3.x", "BigWorld 3.x")
+            ("MAX_COMPAT", "与 Max 兼容", ""),
+            ("BLENDER_NATIVE", "Blender 原生", "")
         ],
-        default='V3'
+        default="MAX_COMPAT"
     )
-
     default_scale: FloatProperty(
-        name="默认单位缩放",
-        description="导出时对几何的统一缩放倍数",
+        name="默认缩放",
+        description="默认单位缩放（与 Max 插件对齐）",
         default=1.0,
-        min=0.001,
-        max=100.0
+        min=0.0001
     )
 
-    coord_mode: EnumProperty(
-        name="坐标系模式",
-        description="坐标模式：Y-Up（与旧版工具链兼容）或 Z-Up（Blender 原生）",
-        items=[
-            ('YUP', "Y-Up", "Y轴向上（与旧版工具链兼容）"),
-            ('ZUP', "Z-Up", "Z轴向上（Blender 原生）"),
-        ],
-        default='YUP'
-    )
-
-    # Validator 默认开关与参数
-    enable_pathfix: BoolProperty(
-        name="启用路径自动修复 (PathValidator)",
+    # —— 默认导出行为（校验与日志）——
+    enable_structure_check: BoolProperty(
+        name="默认启用结构校验（严格）",
+        description="默认启用导出前后结构校验",
         default=True
     )
-
-    enable_structure: BoolProperty(
-        name="启用结构校验 (StructureChecker)",
+    enable_hex_diff: BoolProperty(
+        name="默认启用 Hex 对比",
+        description="默认启用逐字节对比",
         default=True
     )
-
-    enable_hexdiff: BoolProperty(
-        name="启用二进制对比 (HexDiff)",
+    enable_path_fix: BoolProperty(
+        name="默认启用路径自动修复",
+        description="默认启用路径自动修复（将记录到报告）",
         default=False
     )
-
-    hexdiff_max: IntProperty(
-        name="最大差异数",
-        description="HexDiff 比对最多记录的差异数量",
-        default=100,
-        min=1,
-        max=1000
+    save_report: BoolProperty(
+        name="默认保存报告",
+        description="默认以文件形式保存导出与校验报告",
+        default=True
+    )
+    log_level: EnumProperty(
+        name="日志等级",
+        description="默认日志输出等级",
+        items=[
+            ("INFO", "Info", ""),
+            ("DEBUG", "Debug", ""),
+            ("ERROR", "Error", "")
+        ],
+        default="INFO"
     )
 
     def draw(self, context):
         layout = self.layout
 
-        layout.label(text="BigWorld Exporter 插件偏好设置", icon='PREFERENCES')
+        # ▶ 项目路径
+        box_proj = layout.box()
+        box_proj.label(text="BigWorld 插件设置")
+        col_proj = box_proj.column(align=True)
+        col_proj.label(text="项目路径")
+        col_proj.prop(self, "project_root")
+        col_proj.prop(self, "default_export_path")
 
-        box = layout.box()
-        box.label(text="导出根目录与版本")
-        box.prop(self, "export_root")
-        box.prop(self, "engine_version")
-        box.prop(self, "coord_mode")
+        # ▶ 坐标与缩放
+        box_coord = layout.box()
+        box_coord.label(text="坐标与缩放")
+        col_coord = box_coord.column(align=True)
+        col_coord.prop(self, "coordinate_system")
+        col_coord.prop(self, "default_scale")
 
-        box2 = layout.box()
-        box2.label(text="缩放与默认值")
-        box2.prop(self, "default_scale")
+        # ▶ 默认导出行为
+        box_beh = layout.box()
+        box_beh.label(text="默认导出行为")
+        col_beh = box_beh.column(align=True)
+        col_beh.prop(self, "enable_structure_check")
+        col_beh.prop(self, "enable_hex_diff")
+        col_beh.prop(self, "enable_path_fix")
+        col_beh.prop(self, "save_report")
+        col_beh.prop(self, "log_level")
 
-        box3 = layout.box()
-        box3.label(text="Validator 默认设置")
-        row = box3.row()
-        row.prop(self, "enable_pathfix")
-        row = box3.row()
-        row.prop(self, "enable_structure")
-        row = box3.row()
-        row.prop(self, "enable_hexdiff")
-        if self.enable_hexdiff:
-            box3.prop(self, "hexdiff_max")
-
-
-# 注册/卸载
-classes = (
-    BigWorldAddonPreferences,
-)
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
+    bpy.utils.register_class(BigWorldAddonPreferences)
+
 
 def unregister():
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+    bpy.utils.unregister_class(BigWorldAddonPreferences)

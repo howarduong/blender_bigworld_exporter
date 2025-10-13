@@ -20,11 +20,8 @@ import bmesh
 import mathutils
 
 from .binsection_writer import BinSectionWriter, BinaryWriter
-from .utils import (
-    # Axis/unit mapping hooks if collision needs to be in world-space mapped coordinates.
-    # axis_map_y_up_to_z_up_vec3,
-)
-from .utils import ExportAxis, ExportUnits
+# Axis/unit mapping hooks if collision needs to be in world-space mapped coordinates.
+from .utils import ExportAxis, ExportUnits, axis_map_y_up_to_z_up_vec3
 from ..validators.path_validator import validate_output_path
 
 
@@ -103,7 +100,7 @@ class CollisionWriter:
         mesh.calc_loop_triangles()
 
         # Build vertex/index buffers
-        positions = [tuple(v.co) for v in mesh.vertices]
+        positions = [tuple(axis_map_y_up_to_z_up_vec3((v.co.x, v.co.y, v.co.z))) for v in mesh.vertices]
         indices: List[int] = []
         for lt in mesh.loop_triangles:
             # Use vertex indices from loops (triangle vertices property is already vertex indices)
